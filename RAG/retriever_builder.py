@@ -1,7 +1,6 @@
-# RAG/retriever_builder.py
-
 import asyncio
 import nltk
+import re  # ▼▼▼ [수정] 정규 표현식 모듈 임포트 ▼▼▼
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -21,12 +20,17 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     sentences = []
     for chunk in reranked_chunks:
-        # ▼▼▼ [수정] language='english' 인자를 제거하여 NLTK가 언어를 자동 감지하도록 변경 ▼▼▼
-        sents = nltk.sent_tokenize(chunk.page_content)
+        # ▼▼▼ [수정] NLTK 대신 안정적인 정규 표현식(regex)으로 문장 분할 ▼▼▼
+        # . ! ? 뒤에 공백이 오는 경우를 기준으로 문장을 나눕니다.
+        sents = re.split(r'(?<=[.?!])\s+', chunk.page_content)
+        # ▲▲▲ [수정] 여기까지 ▲▲▲
         for i, sent in enumerate(sents):
-            metadata = chunk.metadata.copy()
-            metadata["chunk_location"] = f"chunk_{i+1}"
-            sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+            # 빈 문장이 추가되는 것을 방지
+            if sent:
+                metadata = chunk.metadata.copy()
+                metadata["chunk_location"] = f"chunk_{i+1}"
+                sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
     if not sentences: return []
 
