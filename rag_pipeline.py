@@ -13,18 +13,24 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.vectorstores import FAISS
-from langchain.retrievers import BM25Retriever, ContextualCompressionRetriever
+# ▼▼▼ [수정] BM25Retriever 임포트 경로 변경 ▼▼▼
+from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers.document_compressors import CohereRerank
+from langchain.retrievers import ContextualCompressionRetriever
 from langchain_experimental.text_splitter import SemanticChunker
 
 from file_handler import get_documents_from_files
 
-# --- NLTK 데이터 다운로드 확인 ---
+# ▼▼▼ [수정] NLTK 데이터 자동 다운로드 로직 ▼▼▼
 try:
     nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
-    print("NLTK 'punkt' 모델을 찾을 수 없습니다. setup.py를 실행하여 다운로드해주세요.")
-    # nltk.download('punkt') # 주석 처리: 사용자 직접 실행 유도
+    print("NLTK 'punkt' 모델이 이미 존재합니다.")
+except LookupError:
+    print("NLTK 'punkt' 모델을 찾을 수 없어 다운로드를 시작합니다...")
+    nltk.download('punkt')
+    print("다운로드가 완료되었습니다.")
+# ▲▲▲ [수정] 여기까지 ▲▲▲
+
 
 # --- 파라미터 튜닝을 위한 설정 클래스 ---
 class RAGConfig:
@@ -165,7 +171,7 @@ async def get_retriever_from_source_async(source_type, source_input):
         # 문장 분할 및 메타데이터 보존
         sentences = []
         for chunk in reranked_chunks:
-            sents = nltk.sent_tokenize(chunk.page_content, language='english') # 한국어 잘림 방지 위해 punkt 모델 사용
+            sents = nltk.sent_tokenize(chunk.page_content)
             for i, sent in enumerate(sents):
                 # 출처 표시를 위한 메타데이터 (원본 URL, 제목, 청크 위치) 보존
                 metadata = chunk.metadata.copy()
@@ -201,8 +207,6 @@ async def get_retriever_from_source_async(source_type, source_input):
         # 2차 Cohere Rerank
         print(f"2차 Cohere Rerank (최종 {RAGConfig.RERANK_2_TOP_N}개 문장 선별, Threshold: {RAGConfig.RERANK_2_THRESHOLD})...")
         cohere_compressor_2 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_2_TOP_N)
-        # 2차 리랭크는 LangChain의 압축 리트리버를 직접 사용하지 않고, 결과에 직접 적용합니다.
-        # 이는 최종 문서 목록을 직접 제어하기 위함입니다.
         final_reranker = cohere_compressor_2.compress_documents(documents=faiss_results, query=query)
         
         # Threshold 기반 최종 필터링
