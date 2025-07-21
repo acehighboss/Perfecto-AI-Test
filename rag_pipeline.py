@@ -13,7 +13,6 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.vectorstores import FAISS
-# ▼▼▼ [수정] BM25Retriever 임포트 경로 변경 ▼▼▼
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers.document_compressors import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
