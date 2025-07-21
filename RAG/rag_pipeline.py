@@ -5,8 +5,8 @@ import asyncio
 import time
 import traceback
 
-from data_loader import load_documents
-from retriever_builder import build_retriever
+from .data_loader import load_documents
+from .retriever_builder import build_retriever
 
 async def get_retriever_from_source_async(source_type, source_input):
     """
