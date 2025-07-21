@@ -16,5 +16,12 @@ llama-parse
 nest-asyncio
 lxml[html_clean]
 newspaper3k
-nltk
 aiohttp
+
+spacy
+https://github.com/explosion/spacy-models/releases/download/ko_core_news_sm-3.7.0/ko_core_news_sm-3.7.0.tar.gz
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0.tar.gz
+langdetect
+
+redis
+langchain-redis
