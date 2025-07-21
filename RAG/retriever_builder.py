@@ -1,3 +1,5 @@
+# RAG/retriever_builder.py
+
 import asyncio
 import nltk
 from langchain_core.documents import Document as LangChainDocument
@@ -19,7 +21,8 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     sentences = []
     for chunk in reranked_chunks:
-        sents = nltk.sent_tokenize(chunk.page_content, language='english')
+        # ▼▼▼ [수정] language='english' 인자를 제거하여 NLTK가 언어를 자동 감지하도록 변경 ▼▼▼
+        sents = nltk.sent_tokenize(chunk.page_content)
         for i, sent in enumerate(sents):
             metadata = chunk.metadata.copy()
             metadata["chunk_location"] = f"chunk_{i+1}"
