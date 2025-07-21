@@ -9,7 +9,7 @@ from langchain_cohere import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_experimental.text_splitter import SemanticChunker
 
-from rag_config import RAGConfig
+from .rag_config import RAGConfig
 
 async def _sentence_split_and_embed_async(query: str, compression_retriever_1, embeddings):
     """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행합니다."""
