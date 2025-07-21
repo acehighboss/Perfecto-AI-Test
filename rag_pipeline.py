@@ -95,50 +95,6 @@ async def get_documents_from_urls_async(urls: list[str]) -> list[LangChainDocume
             
     return all_documents
 
-async def sentence_split_and_embed_async(query: str, compression_retriever_1, embeddings):
-    """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행합니다."""
-    print(f"\n사용자 질문으로 1/2단계 필터링 실행: {query}")
-    reranked_chunks = compression_retriever_1.invoke(query)
-    print(f"1차 Rerank 후 {len(reranked_chunks)}개 청크 선별 완료.")
-
-    sentences = []
-    for chunk in reranked_chunks:
-        sents = nltk.sent_tokenize(chunk.page_content)
-        for i, sent in enumerate(sents):
-            metadata = chunk.metadata.copy()
-            metadata["chunk_location"] = f"chunk_{i+1}"
-            sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
-    print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
-    if not sentences: return []
-
-    print("문장 임베딩 및 FAISS 인덱싱 시작...")
-    sentence_texts = [s.page_content for s in sentences]
-    
-    all_embeddings = []
-    for i in range(0, len(sentence_texts), RAGConfig.EMBEDDING_BATCH_SIZE):
-        batch = sentence_texts[i:i + RAGConfig.EMBEDDING_BATCH_SIZE]
-        print(f"임베딩 배치 {i // RAGConfig.EMBEDDING_BATCH_SIZE + 1} 처리 중 ({len(batch)}개 문장)...")
-        batch_embeddings = await embeddings.aembed_documents(batch)
-        all_embeddings.extend(batch_embeddings)
-    
-    text_embedding_pairs = list(zip(sentence_texts, all_embeddings))
-    faiss_index = FAISS.from_embeddings(text_embeddings=text_embedding_pairs, embedding=embeddings, metadatas=[s.metadata for s in sentences])
-    
-    print(f"FAISS 검색 (상위 {RAGConfig.FAISS_TOP_K}개 문장 선별)...")
-    faiss_retriever = faiss_index.as_retriever(search_kwargs={"k": RAGConfig.FAISS_TOP_K})
-    faiss_results = faiss_retriever.invoke(query)
-
-    print(f"2차 Cohere Rerank (최종 {RAGConfig.RERANK_2_TOP_N}개 문장 선별, Threshold: {RAGConfig.RERANK_2_THRESHOLD})...")
-    cohere_compressor_2 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_2_TOP_N)
-    final_reranker = cohere_compressor_2.compress_documents(documents=faiss_results, query=query)
-    
-    final_docs = [
-        doc for doc in final_reranker 
-        if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
-    ][:RAGConfig.FINAL_DOCS_COUNT]
-
-    print(f"최종 {len(final_docs)}개 문장 선별 완료.")
-    return final_docs
 
 async def get_retriever_from_source_async(source_type, source_input):
     """
@@ -157,7 +113,6 @@ async def get_retriever_from_source_async(source_type, source_input):
         documents = await get_documents_from_urls_async(urls)
 
     elif source_type == "Files":
-        # ▼▼▼ [수정] txt 파일과 기타 파일을 분리하여 처리하는 로직 복원 ▼▼▼
         txt_files = [f for f in source_input if f.name.endswith('.txt')]
         other_files = [f for f in source_input if not f.name.endswith('.txt')]
 
@@ -175,7 +130,6 @@ async def get_retriever_from_source_async(source_type, source_input):
             if llama_documents:
                 langchain_docs = [LangChainDocument(page_content=doc.text, metadata=doc.metadata) for doc in llama_documents]
                 documents.extend(langchain_docs)
-        # ▲▲▲ [수정] 여기까지 ▲▲▲
 
     if not documents:
         print("처리할 문서를 찾지 못했습니다.")
@@ -206,14 +160,59 @@ async def get_retriever_from_source_async(source_type, source_input):
         base_compressor=cohere_compressor_1, base_retriever=bm25_retriever
     )
     
-    print("\n[3단계: Retriever 구성 완료]")
+    print("\n[3단계: 문장 단위 변환 및 정밀 검색 시작]")
     
-    # ▼▼▼ [수정] LangChain의 동기 invoke를 위해 동기 래퍼 함수 정의 ▼▼▼
-    def sync_retriever_wrapper(query: str):
-        # nest_asyncio가 적용되었으므로 asyncio.run을 안전하게 사용 가능
-        return asyncio.run(sentence_split_and_embed_async(query, compression_retriever_1, embeddings))
-    
-    return RunnableLambda(sync_retriever_wrapper)
+    # ▼▼▼ [수정] 중첩된 asyncio.run을 제거하고 올바른 await 호출을 사용하도록 수정 ▼▼▼
+    async def sentence_split_and_embed_async_logic(query: str):
+        print(f"\n사용자 질문으로 1/2단계 필터링 실행: {query}")
+        # compression_retriever_1.invoke는 동기 함수이므로, 비동기 컨텍스트에서 직접 호출
+        reranked_chunks = compression_retriever_1.invoke(query)
+        print(f"1차 Rerank 후 {len(reranked_chunks)}개 청크 선별 완료.")
+
+        sentences = []
+        for chunk in reranked_chunks:
+            sents = nltk.sent_tokenize(chunk.page_content)
+            for i, sent in enumerate(sents):
+                metadata = chunk.metadata.copy()
+                metadata["chunk_location"] = f"chunk_{i+1}"
+                sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+        print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
+        if not sentences: return []
+
+        print("문장 임베딩 및 FAISS 인덱싱 시작...")
+        sentence_texts = [s.page_content for s in sentences]
+        
+        all_embeddings = []
+        for i in range(0, len(sentence_texts), RAGConfig.EMBEDDING_BATCH_SIZE):
+            batch = sentence_texts[i:i + RAGConfig.EMBEDDING_BATCH_SIZE]
+            print(f"임베딩 배치 {i // RAGConfig.EMBEDDING_BATCH_SIZE + 1} 처리 중 ({len(batch)}개 문장)...")
+            batch_embeddings = await embeddings.aembed_documents(batch)
+            all_embeddings.extend(batch_embeddings)
+        
+        text_embedding_pairs = list(zip(sentence_texts, all_embeddings))
+        faiss_index = FAISS.from_embeddings(text_embeddings=text_embedding_pairs, embedding=embeddings, metadatas=[s.metadata for s in sentences])
+        
+        print(f"FAISS 검색 (상위 {RAGConfig.FAISS_TOP_K}개 문장 선별)...")
+        faiss_retriever = faiss_index.as_retriever(search_kwargs={"k": RAGConfig.FAISS_TOP_K})
+        faiss_results = faiss_retriever.invoke(query)
+
+        print(f"2차 Cohere Rerank (최종 {RAGConfig.RERANK_2_TOP_N}개 문장 선별, Threshold: {RAGConfig.RERANK_2_THRESHOLD})...")
+        cohere_compressor_2 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_2_TOP_N)
+        final_reranker = cohere_compressor_2.compress_documents(documents=faiss_results, query=query)
+        
+        final_docs = [
+            doc for doc in final_reranker 
+            if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
+        ][:RAGConfig.FINAL_DOCS_COUNT]
+
+        print(f"최종 {len(final_docs)}개 문장 선별 완료.")
+        return final_docs
+
+    def retriever_wrapper(query: str):
+        return asyncio.run(sentence_split_and_embed_async_logic(query))
+
+    return RunnableLambda(retriever_wrapper)
+    # ▲▲▲ [수정] 여기까지 ▲▲▲
 
 
 def get_retriever_from_source(source_type, source_input):
@@ -227,6 +226,7 @@ def get_retriever_from_source(source_type, source_input):
         import traceback
         traceback.print_exc()
         return None
+
 
 def get_conversational_rag_chain(retriever, system_prompt):
     """
