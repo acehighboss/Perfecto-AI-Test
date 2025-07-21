@@ -103,7 +103,7 @@ async def sentence_split_and_embed_async(query: str, compression_retriever_1, em
 
     sentences = []
     for chunk in reranked_chunks:
-        sents = nltk.sent_tokenize(chunk.page_content)
+        sents = nltk.sent_tokenize(chunk.page_content, language='english')
         for i, sent in enumerate(sents):
             metadata = chunk.metadata.copy()
             metadata["chunk_location"] = f"chunk_{i+1}"
