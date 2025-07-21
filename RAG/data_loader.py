@@ -72,7 +72,7 @@ async def load_documents(source_type: str, source_input) -> list[LangChainDocume
         
         if other_files:
             print(f"{len(other_files)}개의 파일(PDF, DOCX 등)을 LlamaParse로 분석합니다...")
-            llama_documents = await get_documents_from_files(other_files)
+            llama_documents = get_documents_from_files(other_files)
             if llama_documents:
                 langchain_docs = [LangChainDocument(page_content=doc.text, metadata=doc.metadata) for doc in llama_documents]
                 documents.extend(langchain_docs)
