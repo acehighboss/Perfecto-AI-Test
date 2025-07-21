@@ -1,6 +1,8 @@
+# RAG/retriever_builder.py
+
 import asyncio
-import nltk
-import re  # ▼▼▼ [수정] 정규 표현식 모듈 임포트 ▼▼▼
+import spacy
+from langdetect import detect, LangDetectException
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -10,7 +12,18 @@ from langchain_cohere import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_experimental.text_splitter import SemanticChunker
 
+from langchain_community.cache import RedisCache
+from redis import Redis
+
 from .rag_config import RAGConfig
+
+try:
+    nlp_ko = spacy.load("ko_core_news_sm")
+    nlp_en = spacy.load("en_core_web_sm")
+    print("spaCy 한국어 및 영어 모델 로딩 완료!")
+except OSError:
+    print("spaCy 모델을 찾을 수 없습니다. requirements.txt를 확인하고 다시 설치해주세요.")
+    nlp_ko, nlp_en = None, None
 
 async def _sentence_split_and_embed_async(query: str, compression_retriever_1, embeddings):
     """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행합니다."""
@@ -20,17 +33,32 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     sentences = []
     for chunk in reranked_chunks:
-        # ▼▼▼ [수정] NLTK 대신 안정적인 정규 표현식(regex)으로 문장 분할 ▼▼▼
-        # . ! ? 뒤에 공백이 오는 경우를 기준으로 문장을 나눕니다.
-        sents = re.split(r'(?<=[.?!])\s+', chunk.page_content)
-        # ▲▲▲ [수정] 여기까지 ▲▲▲
-        for i, sent in enumerate(sents):
-            # 빈 문장이 추가되는 것을 방지
-            if sent:
-                metadata = chunk.metadata.copy()
-                metadata["chunk_location"] = f"chunk_{i+1}"
-                sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+        try:
+            lang = detect(chunk.page_content)
+        except LangDetectException:
+            lang = 'en'
+            
+        if lang == 'ko' and nlp_ko:
+            doc = nlp_ko(chunk.page_content)
+        elif nlp_en:
+            doc = nlp_en(chunk.page_content)
+        else:
+            sents = re.split(r'(?<=[.?!])\s+', chunk.page_content)
+            # doc.sents를 사용하지 않으므로 직접 sents를 순회합니다.
+            for i, sent in enumerate(sents):
+                if sent.strip():
+                    metadata = chunk.metadata.copy()
+                    metadata["chunk_location"] = f"chunk_{i+1}"
+                    sentences.append(LangChainDocument(page_content=sent.strip(), metadata=metadata))
+            continue # spaCy 처리를 건너뛰고 다음 청크로 넘어갑니다.
 
+        # spaCy 처리 결과
+        sents = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        for i, sent in enumerate(sents):
+            metadata = chunk.metadata.copy()
+            metadata["chunk_location"] = f"chunk_{i+1}"
+            sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+            
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
     if not sentences: return []
 
@@ -70,7 +98,22 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 def build_retriever(documents: list[LangChainDocument]):
     """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
     print("\n의미적 경계 기반 청크화 시작...")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+    try:
+        import streamlit as st
+        redis_url = st.secrets.get("REDIS_URL", "redis://localhost:6379")
+        print("Redis 캐시를 연결합니다...")
+        redis_client = Redis.from_url(redis_url)
+        cache = RedisCache(redis_client)
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            cache=cache
+        )
+        print("Redis 캐시 연결 성공!")
+    except Exception as e:
+        print(f"Redis 캐시 연결 실패: {e}. 캐시 없이 진행합니다.")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
     text_splitter = SemanticChunker(
         embeddings,
         breakpoint_threshold_type="percentile",
