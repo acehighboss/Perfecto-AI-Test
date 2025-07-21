@@ -13,8 +13,8 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.vectorstores import FAISS
-from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers.document_compressors import CohereRerank
+from langchain_community.retrievers import BMRetriever
+from langchain_cohere import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_experimental.text_splitter import SemanticChunker
 
@@ -123,7 +123,6 @@ async def sentence_split_and_embed_async(query: str, compression_retriever_1, em
             all_embeddings.extend(batch_embeddings)
         return all_embeddings
 
-    # ▼▼▼ [수정] 중첩된 asyncio.run을 await으로 변경 ▼▼▼
     embedded_vectors = await embed_in_batches()
     
     text_embedding_pairs = list(zip(sentence_texts, embedded_vectors))
