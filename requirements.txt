@@ -4,7 +4,8 @@ langchain-core
 langchain-google-genai
 langchain-community
 langchain-experimental
-langchain-cohere
+langchain-cohere==0.1.5
+cohere==5.5.8
 beautifulsoup4
 faiss-cpu
 python-dotenv
