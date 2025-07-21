@@ -4,7 +4,8 @@ nest_asyncio.apply()
 import streamlit as st
 import time
 import json
-from rag_pipeline import get_retriever_from_source, get_conversational_rag_chain, get_default_chain
+from rag_pipeline import get_retriever_from_source
+from chain_builder import get_conversational_rag_chain, get_default_chain
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="Advanced RAG Chatbot", page_icon="⚙️")
