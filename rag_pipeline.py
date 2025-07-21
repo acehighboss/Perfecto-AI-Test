@@ -190,8 +190,6 @@ async def get_retriever_from_source_async(source_type, source_input):
     text_splitter = SemanticChunker(
         embeddings,
         breakpoint_threshold_type="percentile",
-        min_chunk_size=100,
-        buffer_size=1,
         breakpoint_threshold_amount=95
     )
     chunks = text_splitter.split_documents(documents)
