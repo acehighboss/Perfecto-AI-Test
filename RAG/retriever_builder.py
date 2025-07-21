@@ -1,5 +1,6 @@
 import asyncio
 import spacy
+import re
 from langdetect import detect, LangDetectException
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.runnables import RunnableLambda
