@@ -1,5 +1,3 @@
-# RAG/retriever_builder.py
-
 import asyncio
 import spacy
 from langdetect import detect, LangDetectException
