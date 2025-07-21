@@ -4,6 +4,7 @@ langchain-core
 langchain-google-genai
 langchain-community
 langchain-experimental
+langchain-cohere
 beautifulsoup4
 faiss-cpu
 python-dotenv
@@ -12,7 +13,6 @@ docx2txt
 rank_bm25
 llama-parse
 nest-asyncio
-cohere
 lxml[html_clean]
 newspaper3k
 nltk
