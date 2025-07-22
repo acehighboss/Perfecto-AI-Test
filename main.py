@@ -62,11 +62,20 @@ with st.sidebar:
 
             if source_type:
                 with st.spinner("문서를 병렬로 분석하고 RAG 파이프라인을 준비 중입니다..."):
-                    st.session_state.retriever = get_retriever_from_source(source_type, source_input)
+                    # [수정] get_retriever_from_source가 반환하는 (retriever, errors) 튜플을 받습니다.
+                    retriever, errors = get_retriever_from_source(source_type, source_input)
+                    st.session_state.retriever = retriever
                 
+                # [수정] 안티 크롤링 등 문서 로딩 중 발생한 오류를 사용자에게 표시합니다.
+                if errors:
+                    for error in errors:
+                        st.warning(error)
+                
+                # [수정] retriever가 성공적으로 생성되었을 때만 성공 메시지를 표시합니다.
                 if st.session_state.retriever:
                     st.success("분석이 완료되었습니다! 이제 질문해보세요.")
-                else:
+                # [수정] retriever 생성은 실패했지만, 구체적인 오류 메시지가 없을 때 기본 오류 메시지를 표시합니다.
+                elif not errors:
                     st.error("분석에 실패했습니다. API 키나 URL/파일 상태를 확인해주세요.")
             else:
                 st.warning("분석할 URL을 입력하거나 파일을 업로드해주세요.")
