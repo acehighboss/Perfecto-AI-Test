@@ -8,32 +8,19 @@ from operator import itemgetter
 
 def get_conversational_rag_chain(retriever, system_prompt):
     """
-    최종적으로 생성된 문장 단위의 출처를 사용하여 답변을 생성하는 RAG 체인을 구성합니다.
+    최종적으로 생성된 문장 단위의 출처와 '대화 기록'을 사용하여 답변을 생성하는 RAG 체인을 구성합니다.
     """
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
     
-    rag_prompt_template = f"""{system_prompt}
-
-Answer the user's request based *only* on the provided "Context".
-If the context does not contain the answer, say you don't know.
-Do not use any prior knowledge.
-
-**Context:**
-{{context}}
-
-**User's Request:**
-{{input}}
-
-**Answer (in Korean):**
-"""
+    # 대화 기록을 포함하는 프롬프트
     rag_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"), # 대화 기록이 들어갈 자리
+        MessagesPlaceholder(variable_name="chat_history"),
         ("human", "아래의 컨텍스트를 참고해서 다음 질문에 답해줘."),
         ("human", "Context:\n{context}"),
         ("human", "Question: {input}"),
     ])
-    
+
     def format_docs_with_metadata(docs: list[LangChainDocument]) -> str:
         """문서 리스트를 LLM 프롬프트 형식에 맞게 변환합니다."""
         if not docs:
@@ -54,6 +41,7 @@ Do not use any prior knowledge.
             formatted_string += "\n".join(f"- {s}" for s in sentences)
         return formatted_string.strip()
 
+    # 대화 기록을 포함하여 실행되는 RAG 체인
     rag_chain = (
         RunnablePassthrough.assign(
             context=itemgetter("input") | retriever | RunnableLambda(format_docs_with_metadata)
@@ -61,11 +49,14 @@ Do not use any prior knowledge.
         | rag_prompt
         | llm
         | StrOutputParser()
-    ))
+    )
     
     return rag_chain
 
 def get_default_chain(system_prompt):
+    """
+    RAG 파이프라인이 없을 때 사용되는 기본 체인입니다. (대화 기록 미포함)
+    """
     prompt = ChatPromptTemplate.from_messages(
         [("system", system_prompt), ("user", "{question}")]
     )
