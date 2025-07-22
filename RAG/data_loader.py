@@ -1,6 +1,6 @@
 import asyncio
 import bs4
-import aiohttp # aiohttp import
+import aiohttp
 from newspaper import Article
 from langchain_core.documents import Document as LangChainDocument
 
