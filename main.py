@@ -71,7 +71,7 @@ with st.sidebar:
     st.divider()
     if st.button("대화 초기화"):
         st.session_state.clear()
-        st.experimental_rerun()
+        st.rerun()
 
 # --- 메인 채팅 화면 ---
 for message in st.session_state.get("messages", []):
