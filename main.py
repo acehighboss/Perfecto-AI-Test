@@ -126,6 +126,7 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
 
                     # 최종 결과 객체
                     response_json = {
+                        "question": user_input,
                         "answer": ai_answer,
                         "sources": final_sources,
                         "processing_time": f"{processing_time:.2f}초"
