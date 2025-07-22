@@ -24,7 +24,13 @@ Do not use any prior knowledge.
 
 **Answer (in Korean):**
 """
-    rag_prompt = ChatPromptTemplate.from_template(rag_prompt_template)
+    rag_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="chat_history"), # 대화 기록이 들어갈 자리
+        ("human", "아래의 컨텍스트를 참고해서 다음 질문에 답해줘."),
+        ("human", "Context:\n{context}"),
+        ("human", "Question: {input}"),
+    ])
     
     def format_docs_with_metadata(docs: list[LangChainDocument]) -> str:
         """문서 리스트를 LLM 프롬프트 형식에 맞게 변환합니다."""
@@ -47,7 +53,9 @@ Do not use any prior knowledge.
         return formatted_string.strip()
 
     rag_chain = (
-        {"context": retriever | RunnableLambda(format_docs_with_metadata), "input": RunnablePassthrough()}
+        RunnablePassthrough.assign(
+            context=lambda x: retriever.invoke(x["input"]) | RunnableLambda(format_docs_with_metadata)
+        )
         | rag_prompt
         | llm
         | StrOutputParser()
