@@ -12,7 +12,7 @@ class RAGConfig:
     RERANK_2_TOP_N = 5
 
     # 1순위 (성능에 가장 큰 영향)
-    RERANK_1_THRESHOLD = 0.5
+    RERANK_1_THRESHOLD = 0.4
     RERANK_2_THRESHOLD = 0.7
     FINAL_DOCS_COUNT = 5
     
