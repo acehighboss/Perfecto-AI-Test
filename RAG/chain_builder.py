@@ -3,6 +3,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import AIMessage, HumanMessage
+from operator import itemgetter
 
 def get_conversational_rag_chain(retriever, system_prompt):
     """
@@ -54,12 +56,12 @@ Do not use any prior knowledge.
 
     rag_chain = (
         RunnablePassthrough.assign(
-            context=lambda x: retriever.invoke(x["input"]) | RunnableLambda(format_docs_with_metadata)
+            context=itemgetter("input") | retriever | RunnableLambda(format_docs_with_metadata)
         )
         | rag_prompt
         | llm
         | StrOutputParser()
-    )
+    ))
     
     return rag_chain
 
