@@ -1,40 +1,46 @@
-# RAG/data_loader.py
-
 import asyncio
 import bs4
 import re
-import requests  # requests 라이브러리 사용
+import requests
 import streamlit as st
 from langchain_core.documents import Document as LangChainDocument
 from file_handler import get_documents_from_files
 
+# --- Oxylabs API 호출 함수 ---
 def _get_document_from_url(url: str) -> list:
     """
-    [개선] requests 라이브러리를 사용하여 ScraperAPI를 직접 호출합니다.
+    [개선] requests 라이브러리를 사용하여 Oxylabs API를 직접 호출합니다.
     """
     title = "제목 없음"
     try:
-        # 1. Streamlit secrets에서 API 키를 안전하게 가져옵니다.
+        # 1. Streamlit secrets에서 사용자 인증 정보를 안전하게 가져옵니다.
         try:
-            api_key = st.secrets["SCRAPERAPI_API_KEY"]
+            username = st.secrets["OXYLABS_USERNAME"]
+            password = st.secrets["OXYLABS_PASSWORD"]
         except KeyError:
-            raise KeyError("Streamlit secrets에 'SCRAPERAPI_API_KEY'를 설정해주세요.")
+            raise KeyError("Streamlit secrets에 'OXYLABS_USERNAME'과 'OXYLABS_PASSWORD'를 설정해주세요.")
 
-        # 2. ScraperAPI의 엔드포인트와 파라미터를 설정합니다.
+        # 2. Oxylabs Web Scraper API의 엔드포인트와 payload를 설정합니다.
         payload = {
-            "api_key": api_key,
+            "source": "universal",
             "url": url,
-            "render": "true",  # 자바스크립트 렌더링 활성화
-            "premium": "true", # 프리미엄 프록시로 성공률 향상
+            "render": "html",  # 자바스크립트 렌더링 활성화
         }
         
-        # 3. requests를 이용해 API를 직접 호출합니다. (타임아웃 90초)
-        response = requests.get("http://api.scraperapi.com", params=payload, timeout=90)
-        response.raise_for_status() # 요청 실패 시 예외 발생
-        html_content = response.text # 렌더링된 HTML 텍스트를 가져옵니다.
+        # 3. requests를 이용해 API를 직접 호출합니다. (HTTP Basic Auth 사용)
+        response = requests.post(
+            "https://realtime.oxylabs.io/v1/queries",
+            auth=(username, password),
+            json=payload,
+            timeout=120 # 타임아웃을 120초로 매우 넉넉하게 설정
+        )
+        response.raise_for_status()
+        
+        # Oxylabs는 결과가 JSON 안에 포함되어 있으므로, HTML 콘텐츠를 추출합니다.
+        result_html = response.json()["results"][0]["content"]
         
         # 4. BeautifulSoup으로 본문을 추출합니다.
-        soup = bs4.BeautifulSoup(html_content, "lxml")
+        soup = bs4.BeautifulSoup(result_html, "lxml")
         
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
@@ -58,19 +64,16 @@ def _get_document_from_url(url: str) -> list:
             cleaned_text = content_container.get_text(separator="\n", strip=True)
 
         if cleaned_text and len(cleaned_text) > 100:
-            print(f"✅ [성공] ScraperAPI(직접 호출)로 '{url}' 기사 추출 성공.")
+            print(f"✅ [성공] Oxylabs로 '{url}' 기사 추출 성공.")
             return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title})]
         else:
-            return f"⚠️ [실패] ScraperAPI가 '{url}'에서 유의미한 콘텐츠를 추출하지 못했습니다."
+            return f"⚠️ [실패] Oxylabs가 '{url}'에서 유의미한 콘텐츠를 추출하지 못했습니다."
 
     except Exception as e:
         return f"❌ URL 처리 중 오류 발생 '{url}': {e}"
 
 
 async def _process_url_async(url: str) -> list:
-    """
-    비동기 환경에서 동기 함수인 _get_document_from_url를 실행하기 위한 래퍼 함수입니다.
-    """
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, _get_document_from_url, url)
     return result
@@ -99,11 +102,11 @@ async def load_documents(source_type: str, source_input) -> tuple[list, list]:
         if not urls:
             errors.append("입력된 URL이 없습니다.")
             return [], errors
-        print(f"총 {len(urls)}개의 URL 분석 시작 (ScraperAPI 직접 호출 사용)...")
+        print(f"총 {len(urls)}개의 URL 분석 시작 (Oxylabs API 사용)...")
         documents, url_errors = await _get_documents_from_urls_async(urls)
         errors.extend(url_errors)
 
-    elif source_type == "Files": # 파일 처리 로직은 기존과 동일
+    elif source_type == "Files":
         txt_files = [f for f in source_input if f.name.endswith('.txt')]
         other_files = [f for f in source_input if not f.name.endswith('.txt')]
 
