@@ -1,17 +1,15 @@
-# === LangChain & AI Packages (Fully Pinned for Maximum Stability) ===
-langchain==0.2.5
-langchain-core==0.2.10
-langchain-community==0.2.5
-langchain-experimental==0.0.62
-langchain-google-genai==1.0.5
-langchain-cohere==0.1.9
-cohere==5.5.8
+# === LangChain & AI Packages ===
+langchain
+langchain-core
+langchain-community
+langchain-experimental
+langchain-google-genai
+langchain-cohere
+cohere
 
-# === CRITICAL DEPENDENCY (DO NOT CHANGE) ===
-# Solves binary incompatibility with spacy, faiss-cpu, etc.
-numpy==1.26.4
+numpy
 
-# === Core Functionality (Flexible versions) ===
+# === Core Functionality ===
 spacy
 faiss-cpu
 rank_bm25
