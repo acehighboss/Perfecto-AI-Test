@@ -4,7 +4,7 @@ import re
 import streamlit as st
 from langchain_core.documents import Document as LangChainDocument
 # [추가] LangChain의 ScraperAPI 래퍼 import
-from langchain_community.utilities import ScraperAPIWrapper
+from langchain_community.tools import ScraperAPIWrapper
 
 from file_handler import get_documents_from_files
 
