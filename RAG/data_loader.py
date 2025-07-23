@@ -1,6 +1,7 @@
 import asyncio
 import bs4
 import aiohttp
+import re  # 정규 표현식 모듈 추가
 from newspaper import Article, ArticleException
 from langchain_core.documents import Document as LangChainDocument
 
@@ -8,47 +9,81 @@ from file_handler import get_documents_from_files
 
 async def _process_url(url: str, session) -> list:
     """
-    [수정] 단일 URL을 비동기적으로 처리하며, 안티 크롤링 및 라이브러리 오류를 처리합니다.
-    성공 시 Document 리스트를, 실패 시 에러 메시지(str)를 반환합니다.
+    [개선] newspaper3k 실패 시, BeautifulSoup으로 더욱 강력하게 본문을 추출합니다.
     """
+    html_content = ""
+    title = "제목 없음"
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with session.get(url, timeout=timeout) as response:
+        # 타임아웃을 15초로 늘려 안정성 확보
+        timeout = aiohttp.ClientTimeout(total=15)
+        headers = { # 일반적인 브라우저처럼 보이도록 User-Agent 추가
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        async with session.get(url, timeout=timeout, headers=headers) as response:
             if response.status >= 400:
                 return f"URL 처리 실패 '{url}', 상태 코드: {response.status}. (웹사이트의 보안 정책일 수 있습니다)"
-            
             html_content = await response.text()
-            
-            # newspaper3k로 파싱
-            article = Article(url=url, language='ko')
-            article.html = html_content # [수정] 다운로드 대신 html 콘텐츠를 직접 할당
-            article.parse()
-            
-            title = article.title
-            cleaned_text = article.text
 
-            # newspaper3k가 콘텐츠 추출에 실패했을 경우, BeautifulSoup으로 2차 시도
-            if not cleaned_text or len(cleaned_text) < 100:
-                soup = bs4.BeautifulSoup(html_content, "lxml")
-                for element in soup.select("script, style, nav, footer, aside, .ad, .advertisement, .banner, .menu, .header, .footer"):
-                    element.decompose()
-                content_container = soup.find("main") or soup.find("article") or soup.find("div", class_="content") or soup.find("body")
-                cleaned_text = content_container.get_text(separator="\n", strip=True) if content_container else ""
+        # 1. newspaper3k로 1차 시도
+        try:
+            article = Article(url=url, language='ko')
+            article.html = html_content
+            article.parse()
+            cleaned_text = article.text
+            title = article.title
+
+            # 추출된 텍스트가 너무 짧으면 실패로 간주하고 예비 로직으로 강제 전환
+            if len(cleaned_text or "") < 150:
+                raise ArticleException()
+            
+            print(f"[성공] newspaper3k가 '{url}'의 기사를 성공적으로 추출했습니다.")
+            return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title or "제목 없음"})]
+
+        # 2. newspaper3k 실패 시, BeautifulSoup 예비 로직 발동
+        except ArticleException:
+            print(f"[정보] newspaper3k가 '{url}' 추출에 실패하여 BeautifulSoup으로 재시도합니다.")
+            soup = bs4.BeautifulSoup(html_content, "lxml")
+            
+            # 제목을 더 확실하게 추출
+            if soup.title and soup.title.string:
+                title = soup.title.string
+            elif soup.find("h1"):
+                title = soup.find("h1").get_text()
+
+            # 불필요한 태그 제거 (더 공격적으로 제거)
+            for element in soup.select("script, style, nav, footer, aside, .ad, .advertisement, .banner, .menu, .header, .footer, form, button, input, noscript"):
+                element.decompose()
+            
+            # 다양한 형태의 본문 컨테이너 탐색
+            content_container = (
+                soup.find("main") or 
+                soup.find("article") or 
+                soup.find(role="main") or 
+                soup.find("div", class_=re.compile("content|post|body|article|entry", re.I)) or
+                soup.find("div", id=re.compile("content|post|body|article|entry", re.I))
+            )
+            
+            # 최후의 수단으로 body 전체 사용
+            if not content_container:
+                content_container = soup.find("body")
+            
+            cleaned_text = ""
+            if content_container:
+                cleaned_text = content_container.get_text(separator="\n", strip=True)
 
             if cleaned_text:
-                return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title or "제목 없음"})]
-            return []
-            
+                print(f"[성공] BeautifulSoup이 '{url}'의 기사를 성공적으로 추출했습니다.")
+                return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title})]
+            else:
+                return f"[실패] BeautifulSoup으로도 '{url}'의 기사를 추출하지 못했습니다."
+
     except asyncio.TimeoutError:
         return f"URL 처리 시간 초과: '{url}'"
-    except ArticleException:
-         return f"newspaper3k 라이브러리가 '{url}'의 기사를 추출하지 못했습니다."
     except Exception as e:
         return f"URL 처리 중 알 수 없는 오류 발생 '{url}': {e}"
 
 
 async def _get_documents_from_urls_async(urls: list[str]) -> tuple[list, list]:
-    """여러 URL을 병렬로 처리하고, 성공한 문서와 실패/오류 메시지를 분리하여 반환합니다."""
     async with aiohttp.ClientSession() as session:
         tasks = [_process_url(url, session) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -67,7 +102,6 @@ async def _get_documents_from_urls_async(urls: list[str]) -> tuple[list, list]:
 
 
 async def load_documents(source_type: str, source_input) -> tuple[list, list]:
-    """소스 타입에 따라 문서를 로드하고, 성공 리스트와 에러 리스트를 튜플로 반환합니다."""
     documents = []
     errors = []
     if source_type == "URL":
