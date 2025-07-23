@@ -6,7 +6,6 @@ import time
 import json
 from RAG.rag_pipeline import get_retriever_from_source
 from RAG.chain_builder import get_conversational_rag_chain, get_default_chain
-from langchain_core.messages import AIMessage, HumanMessage
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="Advanced RAG Chatbot", page_icon="⚙️")
@@ -20,8 +19,6 @@ st.markdown(
 # --- 세션 상태 초기화 ---
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
 if "retriever" not in st.session_state:
     st.session_state.retriever = None
 if "system_prompt" not in st.session_state:
@@ -62,20 +59,11 @@ with st.sidebar:
 
             if source_type:
                 with st.spinner("문서를 병렬로 분석하고 RAG 파이프라인을 준비 중입니다..."):
-                    # [수정] get_retriever_from_source가 반환하는 (retriever, errors) 튜플을 받습니다.
-                    retriever, errors = get_retriever_from_source(source_type, source_input)
-                    st.session_state.retriever = retriever
+                    st.session_state.retriever = get_retriever_from_source(source_type, source_input)
                 
-                # [수정] 안티 크롤링 등 문서 로딩 중 발생한 오류를 사용자에게 표시합니다.
-                if errors:
-                    for error in errors:
-                        st.warning(error)
-                
-                # [수정] retriever가 성공적으로 생성되었을 때만 성공 메시지를 표시합니다.
                 if st.session_state.retriever:
                     st.success("분석이 완료되었습니다! 이제 질문해보세요.")
-                # [수정] retriever 생성은 실패했지만, 구체적인 오류 메시지가 없을 때 기본 오류 메시지를 표시합니다.
-                elif not errors:
+                else:
                     st.error("분석에 실패했습니다. API 키나 URL/파일 상태를 확인해주세요.")
             else:
                 st.warning("분석할 URL을 입력하거나 파일을 업로드해주세요.")
@@ -83,7 +71,7 @@ with st.sidebar:
     st.divider()
     if st.button("대화 초기화"):
         st.session_state.clear()
-        st.rerun()
+        st.experimental_rerun()
 
 # --- 메인 채팅 화면 ---
 for message in st.session_state.get("messages", []):
@@ -111,19 +99,19 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
                 with st.spinner("답변을 생성하고 있습니다..."):
                     processing_start_time = time.time()
                     
+                    # 1. Retriever를 사용하여 관련 문서를 가져옵니다.
+                    retrieved_docs = st.session_state.retriever.invoke(user_input)
+                    
+                    # 2. 가져온 문서로 RAG 체인을 실행합니다.
                     rag_chain = get_conversational_rag_chain(
-                        retriever=st.session_state.retriever,
+                        retriever=lambda x: retrieved_docs, # 이미 가져온 문서를 그대로 사용
                         system_prompt=current_system_prompt
                     )
-                    ai_answer = rag_chain.invoke({
-                        "chat_history": st.session_state.chat_history,
-                        "input": user_input
-                    })
+                    ai_answer = rag_chain.invoke(user_input)
                     
                     processing_time = time.time() - processing_start_time
 
                     # --- 요청된 JSON 출력 형식에 맞게 재구성 ---
-                    retrieved_docs = st.session_state.retriever.invoke(user_input)
                     sources_by_url = {}
                     for doc in retrieved_docs:
                         url = doc.metadata.get("source", "N/A")
@@ -138,7 +126,6 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
 
                     # 최종 결과 객체
                     response_json = {
-                        "question": user_input,
                         "answer": ai_answer,
                         "sources": final_sources,
                         "processing_time": f"{processing_time:.2f}초"
@@ -160,11 +147,7 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
                         "sources": response_json["sources"]
                     })
 
-                    # [추가] 대화 기록 업데이트
-                    st.session_state.chat_history.append(HumanMessage(content=user_input))
-                    st.session_state.chat_history.append(AIMessage(content=ai_answer))
-
-            else: # RAG 파이프라인이 없는 경우 (대화 기록 미적용)
+            else: # RAG 파이프라인이 없는 경우
                 chain = get_default_chain(current_system_prompt)
                 ai_answer = st.write_stream(chain.stream({"question": user_input}))
                 st.session_state.messages.append(
