@@ -1,27 +1,39 @@
+# RAG/data_loader.py
+
 import asyncio
 import bs4
 import re
+import requests  # requests 라이브러리 사용
 import streamlit as st
 from langchain_core.documents import Document as LangChainDocument
-from langchain_scraperapi import ScraperAPITool
-
 from file_handler import get_documents_from_files
 
 def _get_document_from_url(url: str) -> list:
     """
-    [최종 개선] langchain-scraperapi의 ScraperAPITool을 사용하여 URL 콘텐츠를 가져옵니다.
+    [개선] requests 라이브러리를 사용하여 ScraperAPI를 직접 호출합니다.
     """
     title = "제목 없음"
     try:
-        # 1. ScraperAPITool을 초기화합니다.
-        # Streamlit secrets의 SCRAPERAPI_API_KEY를 자동으로 사용합니다.
-        scraper_tool = ScraperAPITool(output_format="html")
+        # 1. Streamlit secrets에서 API 키를 안전하게 가져옵니다.
+        try:
+            api_key = st.secrets["SCRAPERAPI_API_KEY"]
+        except KeyError:
+            raise KeyError("Streamlit secrets에 'SCRAPERAPI_API_KEY'를 설정해주세요.")
 
-        # 2. 도구를 실행하여 HTML 콘텐츠를 가져옵니다.
-        # .invoke() 메서드는 이제 딕셔너리 형태의 입력을 받습니다.
-        html_content = scraper_tool.invoke({"url": url})
+        # 2. ScraperAPI의 엔드포인트와 파라미터를 설정합니다.
+        payload = {
+            "api_key": api_key,
+            "url": url,
+            "render": "true",  # 자바스크립트 렌더링 활성화
+            "premium": "true", # 프리미엄 프록시로 성공률 향상
+        }
         
-        # 3. BeautifulSoup으로 본문을 추출합니다.
+        # 3. requests를 이용해 API를 직접 호출합니다. (타임아웃 90초)
+        response = requests.get("http://api.scraperapi.com", params=payload, timeout=90)
+        response.raise_for_status() # 요청 실패 시 예외 발생
+        html_content = response.text # 렌더링된 HTML 텍스트를 가져옵니다.
+        
+        # 4. BeautifulSoup으로 본문을 추출합니다.
         soup = bs4.BeautifulSoup(html_content, "lxml")
         
         if soup.title and soup.title.string:
@@ -46,10 +58,10 @@ def _get_document_from_url(url: str) -> list:
             cleaned_text = content_container.get_text(separator="\n", strip=True)
 
         if cleaned_text and len(cleaned_text) > 100:
-            print(f"✅ [성공] ScraperAPITool로 '{url}' 기사 추출 성공.")
+            print(f"✅ [성공] ScraperAPI(직접 호출)로 '{url}' 기사 추출 성공.")
             return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title})]
         else:
-            return f"⚠️ [실패] ScraperAPITool이 '{url}'에서 유의미한 콘텐츠를 추출하지 못했습니다."
+            return f"⚠️ [실패] ScraperAPI가 '{url}'에서 유의미한 콘텐츠를 추출하지 못했습니다."
 
     except Exception as e:
         return f"❌ URL 처리 중 오류 발생 '{url}': {e}"
@@ -87,15 +99,15 @@ async def load_documents(source_type: str, source_input) -> tuple[list, list]:
         if not urls:
             errors.append("입력된 URL이 없습니다.")
             return [], errors
-        print(f"총 {len(urls)}개의 URL 분석 시작 (langchain-scraperapi 사용)...")
+        print(f"총 {len(urls)}개의 URL 분석 시작 (ScraperAPI 직접 호출 사용)...")
         documents, url_errors = await _get_documents_from_urls_async(urls)
         errors.extend(url_errors)
 
-    elif source_type == "Files":
+    elif source_type == "Files": # 파일 처리 로직은 기존과 동일
         txt_files = [f for f in source_input if f.name.endswith('.txt')]
         other_files = [f for f in source_input if not f.name.endswith('.txt')]
 
-        for txt_file in txt_file:
+        for txt_file in txt_files:
             try:
                 content = txt_file.getvalue().decode('utf-8')
                 doc = LangChainDocument(page_content=content, metadata={"source": txt_file.name, "title": txt_file.name})
