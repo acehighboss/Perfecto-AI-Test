@@ -1,13 +1,13 @@
 # === LangChain & AI Packages (Pinned for Maximum Stability) ===
-langchain==0.2.1
-langchain-core==0.2.3
-langchain-community==0.2.1
-langchain-experimental==0.0.62
-langchain-google-genai==1.0.5
-langchain-cohere==0.1.9
-langchain-scraperapi==0.1.1
-langchain-redis==0.2.3
-cohere==5.5.8
+langchain
+langchain-core
+langchain-community
+langchain-experimental
+langchain-google-genai
+langchain-cohere
+langchain-scraperapi
+langchain-redis
+cohere
 
 # === Key Dependency (To resolve binary conflicts) ===
 numpy==1.26.4
