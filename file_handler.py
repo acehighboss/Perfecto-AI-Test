@@ -1,5 +1,3 @@
-# file_handler.py
-
 import os
 import tempfile
 from llama_parse import LlamaParse
