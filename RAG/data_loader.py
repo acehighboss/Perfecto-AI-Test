@@ -7,24 +7,26 @@ from langchain_core.documents import Document as LangChainDocument
 from file_handler import get_documents_from_files
 
 # --- Oxylabs API 호출 함수 ---
-def _get_document_from_url(url: str) -> list:
+
+# ▼▼▼ [수정 제안] 안정성과 오류 진단을 개선한 함수 ▼▼▼
+def _get_document_from_url(url: str) -> list | str:
     """
-    [개선] requests 라이브러리를 사용하여 Oxylabs API를 직접 호출합니다.
+    [개선] requests 라이브러리와 세분화된 오류 처리를 사용하여 Oxylabs API를 호출합니다.
     """
     title = "제목 없음"
     try:
         # 1. Streamlit secrets에서 사용자 인증 정보를 안전하게 가져옵니다.
-        try:
-            username = st.secrets["OXYLABS_USERNAME"]
-            password = st.secrets["OXYLABS_PASSWORD"]
-        except KeyError:
-            raise KeyError("Streamlit secrets에 'OXYLABS_USERNAME'과 'OXYLABS_PASSWORD'를 설정해주세요.")
+        username = st.secrets["OXYLABS_USERNAME"]
+        password = st.secrets["OXYLABS_PASSWORD"]
 
         # 2. Oxylabs Web Scraper API의 엔드포인트와 payload를 설정합니다.
+        #    - user_agent: 실제 브라우저처럼 보이도록 설정하여 안정성 향상
+        #    - render: 'html'로 설정하여 JavaScript 기반 동적 콘텐츠 렌더링
         payload = {
             "source": "universal",
             "url": url,
-            "render": "html",  # 자바스크립트 렌더링 활성화
+            "render": "html",
+            "user_agent_type": "desktop", # user_agent 추가
         }
         
         # 3. requests를 이용해 API를 직접 호출합니다. (HTTP Basic Auth 사용)
@@ -32,14 +34,20 @@ def _get_document_from_url(url: str) -> list:
             "https://realtime.oxylabs.io/v1/queries",
             auth=(username, password),
             json=payload,
-            timeout=120 # 타임아웃을 120초로 매우 넉넉하게 설정
+            timeout=120
         )
+        # HTTP 오류(4xx, 5xx) 발생 시 예외를 발생시킵니다.
         response.raise_for_status()
         
-        # Oxylabs는 결과가 JSON 안에 포함되어 있으므로, HTML 콘텐츠를 추출합니다.
-        result_html = response.json()["results"][0]["content"]
+        response_json = response.json()
+
+        # 4. [개선] Oxylabs 응답 구조를 더 안전하게 파싱합니다.
+        if not response_json.get("results") or not response_json["results"][0].get("content"):
+            return f"⚠️ [실패] Oxylabs가 '{url}'에 대한 콘텐츠를 반환하지 않았습니다. (응답 구조 오류)"
+
+        result_html = response_json["results"][0]["content"]
         
-        # 4. BeautifulSoup으로 본문을 추출합니다.
+        # 5. BeautifulSoup으로 본문을 추출합니다.
         soup = bs4.BeautifulSoup(result_html, "lxml")
         
         if soup.title and soup.title.string:
@@ -69,8 +77,17 @@ def _get_document_from_url(url: str) -> list:
         else:
             return f"⚠️ [실패] Oxylabs가 '{url}'에서 유의미한 콘텐츠를 추출하지 못했습니다."
 
+    # 6. [개선] 오류 유형에 따라 더 구체적인 예외 메시지를 제공합니다.
+    except KeyError as e:
+        return f"❌ '{url}' 처리 중 설정 오류 발생: Streamlit secrets에 '{e}'가 설정되었는지 확인해주세요."
+    except requests.exceptions.HTTPError as e:
+        return f"❌ '{url}' 처리 중 HTTP 오류 발생: {e.response.status_code} {e.response.reason}. (API 키 또는 URL 확인 필요)"
+    except requests.exceptions.RequestException as e:
+        return f"❌ '{url}' 처리 중 네트워크 오류 발생: {e}"
+    except (IndexError, KeyError) as e:
+        return f"❌ '{url}' 처리 중 API 응답 파싱 오류: {e}. (Oxylabs 응답 형식이 변경되었을 수 있습니다)"
     except Exception as e:
-        return f"❌ URL 처리 중 오류 발생 '{url}': {e}"
+        return f"❌ '{url}' 처리 중 예기치 않은 오류 발생: {e}"
 
 
 async def _process_url_async(url: str) -> list:
