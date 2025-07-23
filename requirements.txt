@@ -1,18 +1,17 @@
-# === LangChain & AI Packages (Pinned for Maximum Stability) ===
-langchain
-langchain-core
-langchain-community
-langchain-experimental
-langchain-google-genai
-langchain-cohere
-langchain-redis
-cohere
+# === LangChain & AI Packages (Fully Pinned for Maximum Stability) ===
+langchain==0.2.5
+langchain-core==0.2.10
+langchain-community==0.2.5
+langchain-experimental==0.0.62
+langchain-google-genai==1.0.5
+langchain-cohere==0.1.9
+cohere==5.5.8
 
-# === Key Dependency (To resolve binary conflicts) ===
+# === CRITICAL DEPENDENCY (DO NOT CHANGE) ===
+# Solves binary incompatibility with spacy, faiss-cpu, etc.
 numpy==1.26.4
 
 # === Core Functionality (Flexible versions) ===
-requests
 spacy
 faiss-cpu
 rank_bm25
@@ -27,6 +26,8 @@ python-dotenv
 nest-asyncio
 langdetect
 redis
+langchain-redis
+requests
 
 # === Spacy Models (Direct links) ===
 https://github.com/explosion/spacy-models/releases/download/ko_core_news_sm-3.7.0/ko_core_news_sm-3.7.0.tar.gz
