@@ -1,34 +1,28 @@
-# === LangChain Core Packages (Latest) ===
-langchain
-langchain-core
-langchain-community
-langchain-experimental
-langchain-google-genai
-langchain-cohere
-langchain-scraperapi
-langchain-redis
+# === LangChain & AI Packages (Pinned for Maximum Stability) ===
+langchain==0.2.1
+langchain-core==0.2.3
+langchain-community==0.2.1
+langchain-experimental==0.0.62
+langchain-google-genai==1.0.5
+langchain-cohere==0.1.9
+langchain-scraperapi==0.1.1
+langchain-redis==0.2.3
+cohere==5.5.8
 
-# === Key Dependencies (Specific versions to resolve conflicts) ===
+# === Key Dependency (To resolve binary conflicts) ===
 numpy==1.26.4
-spacy==3.7.5
 
-# === AI & Vector DB ===
-cohere
+# === Core Functionality (Flexible versions) ===
+spacy
 faiss-cpu
 rank_bm25
-
-# === Web & Data Handling ===
 beautifulsoup4
 lxml[html_clean]
 llama-parse
 newspaper3k
 aiohttp
-
-# === File Handling ===
 python-docx
 docx2txt
-
-# === Utilities ===
 python-dotenv
 nest-asyncio
 langdetect
