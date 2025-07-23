@@ -1,28 +1,39 @@
-streamlit
+# === LangChain Core Packages (Latest) ===
 langchain
 langchain-core
-langchain-google-genai
 langchain-community
 langchain-experimental
-langchain-scraperapi
+langchain-google-genai
 langchain-cohere
+langchain-scraperapi
+langchain-redis
+
+# === Key Dependencies (Specific versions to resolve conflicts) ===
+numpy==1.26.4
+spacy==3.7.5
+
+# === AI & Vector DB ===
 cohere
-beautifulsoup4
 faiss-cpu
-python-dotenv
-python-docx
-docx2txt
 rank_bm25
-llama-parse
-nest-asyncio
+
+# === Web & Data Handling ===
+beautifulsoup4
 lxml[html_clean]
+llama-parse
 newspaper3k
 aiohttp
 
-spacy
+# === File Handling ===
+python-docx
+docx2txt
+
+# === Utilities ===
+python-dotenv
+nest-asyncio
+langdetect
+redis
+
+# === Spacy Models (Direct links) ===
 https://github.com/explosion/spacy-models/releases/download/ko_core_news_sm-3.7.0/ko_core_news_sm-3.7.0.tar.gz
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0.tar.gz
-langdetect
-
-redis
-langchain-redis
