@@ -9,7 +9,7 @@ langchain-redis
 cohere
 
 # === Key Dependency (To resolve binary conflicts) ===
-numpy
+numpy==1.26.4
 
 # === Core Functionality (Flexible versions) ===
 requests
