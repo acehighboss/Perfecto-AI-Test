@@ -1,17 +1,20 @@
-# === LangChain & AI Packages ===
-langchain
-langchain-core
-langchain-community
-langchain-experimental
-langchain-google-genai
-langchain-cohere
-cohere
+# === LangChain & AI Packages (Fully Pinned for Maximum Stability) ===
+langchain==0.2.5
+langchain-core==0.2.10
+langchain-community==0.2.5
+langchain-experimental==0.0.62
+langchain-google-genai==1.0.5
+langchain-cohere==0.1.9
+cohere==5.5.8
 
-numpy
+# === CRITICAL DEPENDENCIES for Binary Compatibility ===
+# numpy, spacy, thinc, faiss-cpu 버전을 함께 고정하여 호환성 충돌을 방지합니다.
+numpy==1.26.4
+spacy==3.7.4
+thinc==8.1.12
+faiss-cpu==1.8.0
 
-# === Core Functionality ===
-spacy
-faiss-cpu
+# === Core Functionality (Flexible versions) ===
 rank_bm25
 beautifulsoup4
 lxml[html_clean]
@@ -27,6 +30,6 @@ redis
 langchain-redis
 requests
 
-# === Spacy Models (Direct links) ===
+# === Spacy Models (Direct links for spacy v3.7.x) ===
 https://github.com/explosion/spacy-models/releases/download/ko_core_news_sm-3.7.0/ko_core_news_sm-3.7.0.tar.gz
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0.tar.gz
