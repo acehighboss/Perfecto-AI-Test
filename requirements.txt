@@ -15,6 +15,5 @@ rank_bm25
 llama-parse
 nest-asyncio
 lxml[html_clean]
-newspaper3k
 nltk
-aiohttp
+playwright
