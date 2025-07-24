@@ -1,19 +1,21 @@
 import subprocess
 import sys
 
-# Streamlit 앱 실행 시 Playwright 브라우저 및 종속성 설치
-# 이 코드는 앱이 시작될 때마다 실행되지만,
-# 브라우저가 이미 설치된 경우 Playwright는 다운로드를 건너뛰므로 빠르게 지나갑니다.
+# Streamlit Cloud 환경에 맞는 Playwright 브라우저 설치
+# 시스템 종속성은 packages.txt로 설치되므로, 여기서는 브라우저만 다운로드합니다.
 try:
     subprocess.run(
-        [f"{sys.executable}", "-m", "playwright", "install", "--with-deps"],
+        # --with-deps 옵션 제거
+        [f"{sys.executable}", "-m", "playwright", "install"],
         check=True,
-        capture_output=True, # 성공 시 터미널에 긴 로그가 출력되지 않도록 설정
+        capture_output=True,
         text=True
     )
 except subprocess.CalledProcessError as e:
-    # 설치 중 오류 발생 시 로그를 출력하고 앱을 중지하여 원인 파악을 돕습니다.
-    print(f"Playwright 브라우저 설치 실패: {e.stderr}")
+    # 오류 발생 시 로그를 명확하게 출력
+    print("Playwright 브라우저 설치 실패. 에러 로그:")
+    print(e.stdout)
+    print(e.stderr)
     raise
 
 import nest_asyncio
