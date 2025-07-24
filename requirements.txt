@@ -17,5 +17,3 @@ nest-asyncio
 lxml[html_clean]
 nltk
 playwright
---no-deps
-playwright install --with-deps
