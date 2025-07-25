@@ -1,42 +1,50 @@
 import asyncio
 import bs4
-from playwright.async_api import async_playwright
 from langchain_core.documents import Document as LangChainDocument
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 from file_handler import get_documents_from_files
 
+# ▼▼▼ [수정] 실제 브라우저처럼 보이게 할 User-Agent 문자열 정의 ▼▼▼
+REALISTIC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+
 async def _scrape_url_with_playwright(url: str) -> list[LangChainDocument]:
     """
-    Playwright를 사용하여 단일 URL의 동적 콘텐츠를 비동기적으로 스크래핑합니다.
+    Playwright와 stealth 플러그인을 사용하여 봇 탐지를 우회하며 동적 콘텐츠를 스크래핑합니다.
     """
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
-            page = await browser.new_page()
             
-            # 네트워크가 안정될 때까지 기다려 동적 콘텐츠 로딩 보장
-            await page.goto(url, wait_until="networkidle") 
+            # ▼▼▼ [수정] User-Agent를 설정하여 브라우저 컨텍스트 생성 ▼▼▼
+            context = await browser.new_context(user_agent=REALISTIC_USER_AGENT)
+            page = await context.new_page()
+
+            # ▼▼▼ [수정] 페이지에 stealth 속성 적용 ▼▼▼
+            await stealth_async(page)
             
-            # 페이지 제목과 렌더링된 HTML 콘텐츠 가져오기
+            # 타임아웃을 30초로 설정하여 너무 오래 기다리지 않도록 함
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            
             title = await page.title()
             html_content = await page.content()
             
             await browser.close()
 
-            # BeautifulSoup으로 HTML 정제
             soup = bs4.BeautifulSoup(html_content, "lxml")
             
-            # 불필요한 태그 제거 (기존 로직 재사용)
             for element in soup.select("script, style, nav, footer, aside, .ad, .advertisement, .banner, .menu, .header, .footer"):
                 element.decompose()
 
-            # 메인 콘텐츠 영역을 우선적으로 탐색하여 텍스트 추출
             content_container = soup.find("main") or soup.find("article") or soup.find("div", class_="content") or soup.find("body")
             cleaned_text = content_container.get_text(separator="\n", strip=True) if content_container else ""
 
             if cleaned_text:
                 return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title or "제목 없음"})]
             return []
+            
     except Exception as e:
         print(f"Playwright로 URL 처리 실패 {url}: {e}")
         return []
@@ -67,12 +75,10 @@ async def load_documents(source_type: str, source_input) -> list[LangChainDocume
         if not urls:
             print("입력된 URL이 없습니다.")
             return []
-        print(f"총 {len(urls)}개의 URL 병렬 크롤링 시작 (Playwright 사용)...")
-        # Playwright 기반의 새 함수 호출
+        print(f"총 {len(urls)}개의 URL 병렬 크롤링 시작 (Playwright Stealth 모드 사용)...")
         documents = await _get_documents_from_urls_async(urls)
 
     elif source_type == "Files":
-        # 파일 처리 로직은 기존과 동일
         txt_files = [f for f in source_input if f.name.endswith('.txt')]
         other_files = [f for f in source_input if not f.name.endswith('.txt')]
 
