@@ -16,6 +16,7 @@ llama-parse
 nest-asyncio
 lxml[html_clean]
 playwright
+playwright-stealth
 redis
 spacy>=3.7.0
 # spaCy 모델 직접 설치
