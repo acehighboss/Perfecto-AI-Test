@@ -47,9 +47,6 @@ if "system_prompt" not in st.session_state:
 # --- 사이드바 UI ---
 with st.sidebar:
     st.header("⚙️ 설정")
-    st.info("LLAMA_CLOUD_API_KEY, GOOGLE_API_KEY, COHERE_API_KEY를 Streamlit secrets에 설정해야 합니다.")
-    st.divider()
-    
     with st.form("persona_form"):
         st.subheader("🤖 AI 페르소나 설정")
         system_prompt_input = st.text_area(
