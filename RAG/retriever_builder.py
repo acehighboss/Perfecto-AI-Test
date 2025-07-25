@@ -25,14 +25,10 @@ except OSError:
 
 async def _sentence_split_and_embed_async(query: str, compression_retriever_1, embeddings):
     """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행 (Redis, spaCy 적용)."""
-    
-    # 1. 쿼리를 기반으로 고유한 캐시 키 생성
+
     cache_key = create_cache_key("rag_result", query)
-    
-    # 2. Redis에서 캐시된 결과 확인
     cached_docs = get_from_cache(cache_key)
     if cached_docs is not None:
-        # 캐시가 존재하면 즉시 반환
         return cached_docs
 
     print(f"\n[Cache Miss] 사용자 질문으로 1/2단계 필터링 실행: {query}")
@@ -40,17 +36,19 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
     print(f"1차 Rerank 후 {len(reranked_chunks)}개 청크 선별 완료.")
 
     sentences = []
-    
-    # spaCy를 이용한 지능형 문장 분할
-    if nlp_korean and nlp_english: # 모델이 정상적으로 로드되었을 때만 실행
-        for chunk in reranked_chunks:
-            # 먼저 한국어 모델로 시도
-            doc = nlp_korean(chunk.page_content)
-            # 휴리스틱: 한국어 문장이 거의 없으면(알파벳 비율이 높으면) 영어 모델 재시도
-            if len(doc.sents) <= 1 and sum(c.isalpha() and 'a' <= c.lower() <= 'z' for c in chunk.page_content) / len(chunk.page_content) > 0.5:
-                doc = nlp_english(chunk.page_content)
 
-            sents = [sent.text.strip() for sent in doc.sents]
+    # ▼▼▼ [수정] spaCy 제너레이터를 리스트로 변환하여 오류 해결 ▼▼▼
+    if nlp_korean and nlp_english:
+        for chunk in reranked_chunks:
+            doc_ko = nlp_korean(chunk.page_content)
+            sents_ko = list(doc_ko.sents)  # 제너레이터를 리스트로 변환
+
+            # 휴리스틱: 한국어 문장이 거의 없거나 알파벳 비율이 높으면 영어 모델 재시도
+            if len(sents_ko) <= 1 and sum(c.isalpha() and 'a' <= c.lower() <= 'z' for c in chunk.page_content) / len(chunk.page_content) > 0.5:
+                doc_en = nlp_english(chunk.page_content)
+                sents = [sent.text.strip() for sent in doc_en.sents]
+            else:
+                sents = [sent.text.strip() for sent in sents_ko]
 
             for i, sent_text in enumerate(sents):
                 if sent_text:
@@ -59,15 +57,15 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
                     sentences.append(LangChainDocument(page_content=sent_text, metadata=metadata))
     else:
         print("spaCy 모델이 없어 문장 분할을 건너뜁니다. 청크를 그대로 사용합니다.")
-        sentences = reranked_chunks # spaCy 실패 시 청크 단위를 그대로 사용
-
+        sentences = reranked_chunks
+    # ▲▲▲ [수정] 여기까지 ▲▲▲
 
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
     if not sentences: return []
 
     print("문장 임베딩 및 FAISS 인덱싱 시작...")
     sentence_texts = [s.page_content for s in sentences]
-    
+
     async def embed_in_batches():
         all_embeddings = []
         for i in range(0, len(sentence_texts), RAGConfig.EMBEDDING_BATCH_SIZE):
@@ -95,7 +93,6 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
         if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
     ][:RAGConfig.FINAL_DOCS_COUNT]
 
-    # 최종 결과를 Redis에 저장
     set_to_cache(cache_key, final_docs)
 
     print(f"최종 {len(final_docs)}개 문장 선별 완료.")
