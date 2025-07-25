@@ -13,7 +13,7 @@ class RAGConfig:
 
     # 1순위 (성능에 가장 큰 영향)
     RERANK_1_THRESHOLD = 0.3
-    RERANK_2_THRESHOLD = 0.7
+    RERANK_2_THRESHOLD = 0.5
     FINAL_DOCS_COUNT = 5
     
     # 임베딩 배치 설정
