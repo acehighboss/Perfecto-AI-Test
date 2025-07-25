@@ -7,7 +7,7 @@ class RAGConfig:
 
     # 2순위 (중간 영향)
     BM25_TOP_K = 70
-    RERANK_1_TOP_N = 20
+    RERANK_1_TOP_N = 30
     FAISS_TOP_K = 15
     RERANK_2_TOP_N = 5
 
