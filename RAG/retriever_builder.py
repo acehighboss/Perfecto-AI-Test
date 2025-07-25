@@ -1,3 +1,4 @@
+# RAG/retriever_builder.py (최종 수정본)
 import asyncio
 import spacy
 from langchain_core.documents import Document as LangChainDocument
@@ -7,7 +8,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain_cohere import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 
 from .rag_config import RAGConfig
 from .redis_cache import get_from_cache, set_to_cache, create_cache_key
@@ -101,13 +102,14 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
 def build_retriever(documents: list[LangChainDocument]):
     """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
-    # ▼▼▼ [수정] RecursiveCharacterTextSplitter를 사용하여 문서를 청크로 분할 ▼▼▼
-    print("\nRecursiveCharacterTextSplitter 기반 청크화 시작...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,       # 청크 크기를 800자로 설정
-        chunk_overlap=100,    # 청크 간 100자씩 겹치게 설정
-        length_function=len,
-        is_separator_regex=False,
+    # ▼▼▼ [수정] SemanticChunker를 다시 사용하고, PDF 처리 능력 향상을 위해 breakpoint_threshold_amount 조정 ▼▼▼
+    print("\nSemanticChunker 기반 의미적 청크화 시작...")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    text_splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile",
+        # Threshold를 낮춰서 더 작은 의미 단위로 나누도록 유도 (테이블, 리스트 분할에 효과적)
+        breakpoint_threshold_amount=90, 
     )
     chunks = text_splitter.split_documents(documents)
     print(f"총 {len(chunks)}개의 청크 생성 완료.")
@@ -127,9 +129,7 @@ def build_retriever(documents: list[LangChainDocument]):
     print("\n[3단계: Retriever 구성 완료]")
     
     def sync_retriever_wrapper(query: str):
-        # build_retriever에서 생성된 compression_retriever_1를 그대로 사용합니다.
-        # embeddings는 이 함수 스코프 내에서 정의되지 않았으므로 GoogleGenerativeAIEmbeddings를 직접 생성합니다.
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        return asyncio.run(_sentence_split_and_embed_async(query, compression_retriever_1, embeddings))
+        embeddings_for_async = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        return asyncio.run(_sentence_split_and_embed_async(query, compression_retriever_1, embeddings_for_async))
     
     return RunnableLambda(sync_retriever_wrapper)
