@@ -7,7 +7,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain_cohere import CohereRerank
 from langchain.retrievers import ContextualCompressionRetriever
-from langchain_experimental.text_splitter import SemanticChunker
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from .rag_config import RAGConfig
 from .redis_cache import get_from_cache, set_to_cache, create_cache_key
@@ -36,17 +36,14 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     sentences = []
 
-    # ▼▼▼ [수정] 영어/한국어 처리 로직 모두에서 제너레이터를 리스트로 변환하여 오류 최종 해결 ▼▼▼
     if nlp_korean and nlp_english:
         for chunk in reranked_chunks:
-            # page_content의 길이가 0인 경우 건너뛰기
             if not chunk.page_content or not chunk.page_content.strip():
                 continue
 
             doc_ko = nlp_korean(chunk.page_content)
-            sents_ko = list(doc_ko.sents)  # 한국어 제너레이터를 리스트로 변환
+            sents_ko = list(doc_ko.sents)
 
-            # 휴리스틱: 한국어 문장이 1개 이하이고, 텍스트의 50% 이상이 알파벳이면 영어 모델로 재시도
             if len(sents_ko) <= 1 and sum(c.isalpha() and 'a' <= c.lower() <= 'z' for c in chunk.page_content) / len(chunk.page_content) > 0.5:
                 doc_en = nlp_english(chunk.page_content)
                 sents = [sent.text.strip() for sent in doc_en.sents]
@@ -61,7 +58,6 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
     else:
         print("spaCy 모델이 없어 문장 분할을 건너뜁니다. 청크를 그대로 사용합니다.")
         sentences = reranked_chunks
-    # ▲▲▲ [수정] 여기까지 ▲▲▲
 
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
     if not sentences:
@@ -105,13 +101,13 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
 def build_retriever(documents: list[LangChainDocument]):
     """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
-    print("\n의미적 경계 기반 청크화 시작...")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    text_splitter = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type="percentile",
-        breakpoint_threshold_amount=95,
-        buffer_size=1
+    # ▼▼▼ [수정] RecursiveCharacterTextSplitter를 사용하여 문서를 청크로 분할 ▼▼▼
+    print("\nRecursiveCharacterTextSplitter 기반 청크화 시작...")
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,       # 청크 크기를 800자로 설정
+        chunk_overlap=100,    # 청크 간 100자씩 겹치게 설정
+        length_function=len,
+        is_separator_regex=False,
     )
     chunks = text_splitter.split_documents(documents)
     print(f"총 {len(chunks)}개의 청크 생성 완료.")
@@ -131,6 +127,9 @@ def build_retriever(documents: list[LangChainDocument]):
     print("\n[3단계: Retriever 구성 완료]")
     
     def sync_retriever_wrapper(query: str):
+        # build_retriever에서 생성된 compression_retriever_1를 그대로 사용합니다.
+        # embeddings는 이 함수 스코프 내에서 정의되지 않았으므로 GoogleGenerativeAIEmbeddings를 직접 생성합니다.
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         return asyncio.run(_sentence_split_and_embed_async(query, compression_retriever_1, embeddings))
     
     return RunnableLambda(sync_retriever_wrapper)
