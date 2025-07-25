@@ -81,4 +81,56 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     embedded_vectors = await embed_in_batches()
     
-    text_embedding_pairs =
+    text_embedding_pairs = list(zip(sentence_texts, embedded_vectors))
+    faiss_index = FAISS.from_embeddings(text_embeddings=text_embedding_pairs, embedding=embeddings, metadatas=[s.metadata for s in sentences])
+    
+    print(f"FAISS 검색 (상위 {RAGConfig.FAISS_TOP_K}개 문장 선별)...")
+    faiss_retriever = faiss_index.as_retriever(search_kwargs={"k": RAGConfig.FAISS_TOP_K})
+    faiss_results = faiss_retriever.invoke(query)
+
+    print(f"2차 Cohere Rerank (최종 {RAGConfig.RERANK_2_TOP_N}개 문장 선별, Threshold: {RAGConfig.RERANK_2_THRESHOLD})...")
+    cohere_compressor_2 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_2_TOP_N)
+    final_reranker = cohere_compressor_2.compress_documents(documents=faiss_results, query=query)
+    
+    final_docs = [
+        doc for doc in final_reranker 
+        if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
+    ][:RAGConfig.FINAL_DOCS_COUNT]
+
+    set_to_cache(cache_key, final_docs)
+
+    print(f"최종 {len(final_docs)}개 문장 선별 완료.")
+    return final_docs
+
+
+def build_retriever(documents: list[LangChainDocument]):
+    """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
+    print("\n의미적 경계 기반 청크화 시작...")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    text_splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile",
+        breakpoint_threshold_amount=95,
+        buffer_size=1
+    )
+    chunks = text_splitter.split_documents(documents)
+    print(f"총 {len(chunks)}개의 청크 생성 완료.")
+    if not chunks:
+        return None
+
+    print("\n[2단계: 청크 단위 1차 필터링 시작]")
+    print(f"BM25 검색 (상위 {RAGConfig.BM25_TOP_K}개 선별)...")
+    bm25_retriever = BM25Retriever.from_documents(chunks, k=RAGConfig.BM25_TOP_K, bm25_params={'k1': RAGConfig.BM25_K1, 'b': RAGConfig.BM25_B})
+    
+    print(f"1차 Cohere Rerank (상위 {RAGConfig.RERANK_1_TOP_N}개 압축, Threshold: {RAGConfig.RERANK_1_THRESHOLD})...")
+    cohere_compressor_1 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_1_TOP_N)
+    compression_retriever_1 = ContextualCompressionRetriever(
+        base_compressor=cohere_compressor_1, base_retriever=bm25_retriever
+    )
+    
+    print("\n[3단계: Retriever 구성 완료]")
+    
+    def sync_retriever_wrapper(query: str):
+        return asyncio.run(_sentence_split_and_embed_async(query, compression_retriever_1, embeddings))
+    
+    return RunnableLambda(sync_retriever_wrapper)
