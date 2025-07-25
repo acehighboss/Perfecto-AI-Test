@@ -1,6 +1,5 @@
 import asyncio
-import nltk
-import re  # ▼▼▼ [수정] 정규 표현식 모듈 임포트 ▼▼▼
+import spacy
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -11,25 +10,57 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain_experimental.text_splitter import SemanticChunker
 
 from .rag_config import RAGConfig
+from .redis_cache import get_from_cache, set_to_cache, create_cache_key
+
+# spaCy 언어 모델 로드 (앱 실행 시 한 번만 로드)
+try:
+    nlp_korean = spacy.load("ko_core_news_sm")
+    nlp_english = spacy.load("en_core_web_sm")
+    print("✅ spaCy language models loaded successfully.")
+except OSError:
+    print("⚠️ spaCy 모델을 찾을 수 없습니다. 'requirements.txt'에 모델이 포함되었는지 확인하세요.")
+    # 모델 로드 실패 시 기본값으로 None 설정
+    nlp_korean, nlp_english = None, None
+
 
 async def _sentence_split_and_embed_async(query: str, compression_retriever_1, embeddings):
-    """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행합니다."""
-    print(f"\n사용자 질문으로 1/2단계 필터링 실행: {query}")
+    """(비동기) 1, 2단계 필터링 및 문장 분할, 임베딩, 최종 Rerank를 수행 (Redis, spaCy 적용)."""
+    
+    # 1. 쿼리를 기반으로 고유한 캐시 키 생성
+    cache_key = create_cache_key("rag_result", query)
+    
+    # 2. Redis에서 캐시된 결과 확인
+    cached_docs = get_from_cache(cache_key)
+    if cached_docs is not None:
+        # 캐시가 존재하면 즉시 반환
+        return cached_docs
+
+    print(f"\n[Cache Miss] 사용자 질문으로 1/2단계 필터링 실행: {query}")
     reranked_chunks = compression_retriever_1.invoke(query)
     print(f"1차 Rerank 후 {len(reranked_chunks)}개 청크 선별 완료.")
 
     sentences = []
-    for chunk in reranked_chunks:
-        # ▼▼▼ [수정] NLTK 대신 안정적인 정규 표현식(regex)으로 문장 분할 ▼▼▼
-        # . ! ? 뒤에 공백이 오는 경우를 기준으로 문장을 나눕니다.
-        sents = re.split(r'(?<=[.?!])\s+', chunk.page_content)
-        # ▲▲▲ [수정] 여기까지 ▲▲▲
-        for i, sent in enumerate(sents):
-            # 빈 문장이 추가되는 것을 방지
-            if sent:
-                metadata = chunk.metadata.copy()
-                metadata["chunk_location"] = f"chunk_{i+1}"
-                sentences.append(LangChainDocument(page_content=sent, metadata=metadata))
+    
+    # spaCy를 이용한 지능형 문장 분할
+    if nlp_korean and nlp_english: # 모델이 정상적으로 로드되었을 때만 실행
+        for chunk in reranked_chunks:
+            # 먼저 한국어 모델로 시도
+            doc = nlp_korean(chunk.page_content)
+            # 휴리스틱: 한국어 문장이 거의 없으면(알파벳 비율이 높으면) 영어 모델 재시도
+            if len(doc.sents) <= 1 and sum(c.isalpha() and 'a' <= c.lower() <= 'z' for c in chunk.page_content) / len(chunk.page_content) > 0.5:
+                doc = nlp_english(chunk.page_content)
+
+            sents = [sent.text.strip() for sent in doc.sents]
+
+            for i, sent_text in enumerate(sents):
+                if sent_text:
+                    metadata = chunk.metadata.copy()
+                    metadata["chunk_location"] = f"chunk_{i+1}"
+                    sentences.append(LangChainDocument(page_content=sent_text, metadata=metadata))
+    else:
+        print("spaCy 모델이 없어 문장 분할을 건너뜁니다. 청크를 그대로 사용합니다.")
+        sentences = reranked_chunks # spaCy 실패 시 청크 단위를 그대로 사용
+
 
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
     if not sentences: return []
@@ -64,8 +95,12 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
         if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
     ][:RAGConfig.FINAL_DOCS_COUNT]
 
+    # 최종 결과를 Redis에 저장
+    set_to_cache(cache_key, final_docs)
+
     print(f"최종 {len(final_docs)}개 문장 선별 완료.")
     return final_docs
+
 
 def build_retriever(documents: list[LangChainDocument]):
     """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
