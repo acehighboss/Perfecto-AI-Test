@@ -19,7 +19,6 @@ try:
     print("✅ spaCy language models loaded successfully.")
 except OSError:
     print("⚠️ spaCy 모델을 찾을 수 없습니다. 'requirements.txt'에 모델이 포함되었는지 확인하세요.")
-    # 모델 로드 실패 시 기본값으로 None 설정
     nlp_korean, nlp_english = None, None
 
 
@@ -37,13 +36,17 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     sentences = []
 
-    # ▼▼▼ [수정] spaCy 제너레이터를 리스트로 변환하여 오류 해결 ▼▼▼
+    # ▼▼▼ [수정] 영어/한국어 처리 로직 모두에서 제너레이터를 리스트로 변환하여 오류 최종 해결 ▼▼▼
     if nlp_korean and nlp_english:
         for chunk in reranked_chunks:
-            doc_ko = nlp_korean(chunk.page_content)
-            sents_ko = list(doc_ko.sents)  # 제너레이터를 리스트로 변환
+            # page_content의 길이가 0인 경우 건너뛰기
+            if not chunk.page_content or not chunk.page_content.strip():
+                continue
 
-            # 휴리스틱: 한국어 문장이 거의 없거나 알파벳 비율이 높으면 영어 모델 재시도
+            doc_ko = nlp_korean(chunk.page_content)
+            sents_ko = list(doc_ko.sents)  # 한국어 제너레이터를 리스트로 변환
+
+            # 휴리스틱: 한국어 문장이 1개 이하이고, 텍스트의 50% 이상이 알파벳이면 영어 모델로 재시도
             if len(sents_ko) <= 1 and sum(c.isalpha() and 'a' <= c.lower() <= 'z' for c in chunk.page_content) / len(chunk.page_content) > 0.5:
                 doc_en = nlp_english(chunk.page_content)
                 sents = [sent.text.strip() for sent in doc_en.sents]
@@ -61,7 +64,8 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
     # ▲▲▲ [수정] 여기까지 ▲▲▲
 
     print(f"총 {len(sentences)}개의 문장으로 분할 완료.")
-    if not sentences: return []
+    if not sentences:
+        return []
 
     print("문장 임베딩 및 FAISS 인덱싱 시작...")
     sentence_texts = [s.page_content for s in sentences]
@@ -77,55 +81,4 @@ async def _sentence_split_and_embed_async(query: str, compression_retriever_1, e
 
     embedded_vectors = await embed_in_batches()
     
-    text_embedding_pairs = list(zip(sentence_texts, embedded_vectors))
-    faiss_index = FAISS.from_embeddings(text_embeddings=text_embedding_pairs, embedding=embeddings, metadatas=[s.metadata for s in sentences])
-    
-    print(f"FAISS 검색 (상위 {RAGConfig.FAISS_TOP_K}개 문장 선별)...")
-    faiss_retriever = faiss_index.as_retriever(search_kwargs={"k": RAGConfig.FAISS_TOP_K})
-    faiss_results = faiss_retriever.invoke(query)
-
-    print(f"2차 Cohere Rerank (최종 {RAGConfig.RERANK_2_TOP_N}개 문장 선별, Threshold: {RAGConfig.RERANK_2_THRESHOLD})...")
-    cohere_compressor_2 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_2_TOP_N)
-    final_reranker = cohere_compressor_2.compress_documents(documents=faiss_results, query=query)
-    
-    final_docs = [
-        doc for doc in final_reranker 
-        if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
-    ][:RAGConfig.FINAL_DOCS_COUNT]
-
-    set_to_cache(cache_key, final_docs)
-
-    print(f"최종 {len(final_docs)}개 문장 선별 완료.")
-    return final_docs
-
-
-def build_retriever(documents: list[LangChainDocument]):
-    """문서 리스트를 받아 다단계 Retriever를 구성하고 반환합니다."""
-    print("\n의미적 경계 기반 청크화 시작...")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    text_splitter = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type="percentile",
-        breakpoint_threshold_amount=95,
-        buffer_size=1
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"총 {len(chunks)}개의 청크 생성 완료.")
-    if not chunks: return None
-
-    print("\n[2단계: 청크 단위 1차 필터링 시작]")
-    print(f"BM25 검색 (상위 {RAGConfig.BM25_TOP_K}개 선별)...")
-    bm25_retriever = BM25Retriever.from_documents(chunks, k=RAGConfig.BM25_TOP_K, bm25_params={'k1': RAGConfig.BM25_K1, 'b': RAGConfig.BM25_B})
-    
-    print(f"1차 Cohere Rerank (상위 {RAGConfig.RERANK_1_TOP_N}개 압축, Threshold: {RAGConfig.RERANK_1_THRESHOLD})...")
-    cohere_compressor_1 = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_1_TOP_N)
-    compression_retriever_1 = ContextualCompressionRetriever(
-        base_compressor=cohere_compressor_1, base_retriever=bm25_retriever
-    )
-    
-    print("\n[3단계: Retriever 구성 완료]")
-    
-    def sync_retriever_wrapper(query: str):
-        return asyncio.run(_sentence_split_and_embed_async(query, compression_retriever_1, embeddings))
-    
-    return RunnableLambda(sync_retriever_wrapper)
+    text_embedding_pairs =
