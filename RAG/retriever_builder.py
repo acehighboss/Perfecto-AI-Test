@@ -47,17 +47,17 @@ def _split_documents_into_sentences(documents: list[LangChainDocument]) -> list[
                 sentences.append(LangChainDocument(page_content=sent.text.strip(), metadata=doc.metadata.copy()))
 
     # ▼▼▼ [디버깅 코드] ▼▼▼
-    print("\n\n" + "="*50)
-    print("🕵️ 2. [retriever_builder] 문장 분할 결과 확인")
-    print(f"총 {len(sentences)}개의 문장으로 분할되었습니다.")
+    print("\n\n" + "="*50, flush=True)
+    print("🕵️ 2. [retriever_builder] 문장 분할 결과 확인", flush=True)
+    print(f"총 {len(sentences)}개의 문장으로 분할되었습니다.", flush=True)
     eps_sentences = [s.page_content for s in sentences if "EPS" in s.page_content]
     if eps_sentences:
-        print("✅ EPS 관련 문장이 성공적으로 분할되었습니다:")
+        print("✅ EPS 관련 문장이 성공적으로 분할되었습니다:", flush=True)
         for sent in eps_sentences:
-            print(f"   - {sent}")
+            print(f"   - {sent}", flush=True)
     else:
-        print("🚨 경고: 문장 분할 후 EPS 관련 정보를 찾을 수 없습니다.")
-    print("="*50 + "\n\n")
+        print("🚨 경고: 문장 분할 후 EPS 관련 정보를 찾을 수 없습니다.", flush=True)
+    print("="*50 + "\n\n", flush=True)
     # ▲▲▲ [디버깅 코드] ▲▲▲
     
     return sentences
