@@ -5,7 +5,6 @@ from llama_parse import LlamaParse
 # LlamaParse를 사용하기 위한 parser 객체 초기화
 parser = LlamaParse(result_type="markdown")
 
-# ▼▼▼ [수정] 함수를 동기(synchronous) 방식으로 변경하여 안정성 확보 ▼▼▼
 def get_documents_from_files(uploaded_files):
     """
     업로드된 파일 리스트를 LlamaParse를 사용하여 동기적으로 로드하고 구조화합니다.
