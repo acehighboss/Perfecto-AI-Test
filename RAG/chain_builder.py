@@ -44,6 +44,14 @@ Do not use any prior knowledge.
         for (source_url, title), sentences in sources.items():
             formatted_string += f"\n--- Source: {title} ({source_url}) ---\n"
             formatted_string += "\n".join(f"- {s}" for s in sentences)
+
+        # ▼▼▼ [디버깅 코드] ▼▼▼
+        print("\n\n" + "="*50)
+        print("🕵️ 4. [chain_builder] LLM에 전달되는 최종 컨텍스트 확인")
+        print(formatted_string.strip())
+        print("="*50 + "\n\n")
+        # ▲▲▲ [디버깅 코드] ▲▲▲
+        
         return formatted_string.strip()
 
     rag_chain = (
