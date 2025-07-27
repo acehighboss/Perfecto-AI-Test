@@ -90,5 +90,17 @@ async def load_documents(source_type: str, source_input) -> list[LangChainDocume
             if llama_documents:
                 langchain_docs = [LangChainDocument(page_content=doc.text, metadata=doc.metadata) for doc in llama_documents]
                 documents.extend(langchain_docs)
+
+                # ▼▼▼ [디버깅 코드] ▼▼▼
+                print("\n\n" + "="*50)
+                print("🕵️ 1. [data_loader] LlamaParse가 추출한 전체 텍스트 확인")
+                print(f"총 {len(documents)}개의 Document가 로드되었습니다.")
+                for i, doc in enumerate(documents):
+                    # EPS 정보가 포함된 텍스트가 있는지 확인
+                    if "EPS" in doc.page_content:
+                        print(f"\n--- Document #{i+1} (EPS 정보 포함 가능성) ---")
+                        print(doc.page_content[:1000] + "...") # 내용이 길 수 있으므로 일부만 출력
+                print("="*50 + "\n\n")
+                # ▲▲▲ [디버깅 코드] ▲▲▲
     
     return documents
