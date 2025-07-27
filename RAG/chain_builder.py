@@ -45,13 +45,6 @@ Do not use any prior knowledge.
             formatted_string += f"\n--- Source: {title} ({source_url}) ---\n"
             formatted_string += "\n".join(f"- {s}" for s in sentences)
 
-        # ▼▼▼ [디버깅 코드] ▼▼▼
-        print("\n\n" + "="*50, flush=True)
-        print("🕵️ 4. [chain_builder] LLM에 전달되는 최종 컨텍스트 확인", flush=True)
-        print(formatted_string.strip(), flush=True)
-        print("="*50 + "\n\n", flush=True)
-        # ▲▲▲ [디버깅 코드] ▲▲▲
-        
         return formatted_string.strip()
 
     rag_chain = (
