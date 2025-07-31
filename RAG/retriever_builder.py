@@ -11,7 +11,7 @@ from langchain.retrievers import EnsembleRetriever
 from .rag_config import RAGConfig
 from .redis_cache import get_from_cache, set_to_cache, create_cache_key
 
-# spaCy 언어 모델 로드 (앱 실행 시 한 번만 로드)
+# spaCy 언어 모델 로드
 try:
     nlp_korean = spacy.load("ko_core_news_sm")
     nlp_english = spacy.load("en_core_web_sm")
@@ -22,7 +22,6 @@ except OSError:
 
 def _split_documents_into_sentences(documents: list[LangChainDocument]) -> list[LangChainDocument]:
     """문서 리스트를 spaCy를 이용해 문장 단위로 분할합니다."""
-    # (기존 코드와 동일)
     sentences = []
     if not nlp_korean or not nlp_english:
         print("spaCy 모델이 로드되지 않아 문장 분할을 건너뜁니다.")
@@ -46,18 +45,13 @@ def _split_documents_into_sentences(documents: list[LangChainDocument]) -> list[
     
     return sentences
 
-def build_retriever(documents: list[LangChainDocument], rag_params: dict):
+def build_retriever(documents: list[LangChainDocument]):
     """
     문서를 문장 단위로 분해하고, 하이브리드 검색 및 Rerank를 수행하는 RAG 파이프라인을 구성합니다.
-    UI에서 받은 동적 파라미터를 사용합니다.
+    RAGConfig의 고정된 설정값을 사용합니다.
     """
     if not documents:
         return None
-        
-    # UI 또는 기본값에서 파라미터 가져오기
-    bm25_top_k = rag_params.get("bm25_top_k", RAGConfig.BM25_TOP_K)
-    rerank_top_n = rag_params.get("rerank_top_n", RAGConfig.RERANK_1_TOP_N)
-    final_docs_count = rag_params.get("final_docs_count", RAGConfig.FINAL_DOCS_COUNT)
 
     print("\n[1단계: 문서 전체를 문장 단위로 분할]")
     sentences = _split_documents_into_sentences(documents)
@@ -70,14 +64,14 @@ def build_retriever(documents: list[LangChainDocument], rag_params: dict):
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
     try:
         vectorstore = FAISS.from_documents(sentences, embeddings)
-        faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": bm25_top_k})
+        faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": RAGConfig.BM25_TOP_K})
     except Exception as e:
         print(f"FAISS 인덱스 생성 실패: {e}")
         return None
     
-    print(f"\n[3단계: 키워드 기반 BM25 Retriever 생성 (k={bm25_top_k})]")
+    print(f"\n[3단계: 키워드 기반 BM25 Retriever 생성 (k={RAGConfig.BM25_TOP_K})]")
     bm25_retriever = BM25Retriever.from_documents(sentences)
-    bm25_retriever.k = bm25_top_k
+    bm25_retriever.k = RAGConfig.BM25_TOP_K
 
     print("\n[4단계: 하이브리드 Ensemble Retriever 구성]")
     ensemble_retriever = EnsembleRetriever(
@@ -85,20 +79,19 @@ def build_retriever(documents: list[LangChainDocument], rag_params: dict):
         weights=[0.5, 0.5]
     )
 
-    print(f"\n[5단계: Cohere Reranker 구성 (top_n={rerank_top_n})]")
-    cohere_reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=rerank_top_n)
+    print(f"\n[5단계: Cohere Reranker 구성 (top_n={RAGConfig.RERANK_1_TOP_N})]")
+    cohere_reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_1_TOP_N)
 
     # 6. 최종 파이프라인 체인 구성
     def get_cached_or_run_pipeline(query: str):
-        # 캐시 키에 동적 파라미터를 포함하여, 설정이 바뀔 때마다 다시 계산하도록 함
-        cache_key_params = f"bm25k_{bm25_top_k}-rerankN_{rerank_top_n}-final_{final_docs_count}"
-        cache_key = create_cache_key(f"final_rag_result_openai_{cache_key_params}", query)
+        # 캐시 키를 다시 단순화
+        cache_key = create_cache_key("final_rag_result_openai", query)
         
         cached_docs = get_from_cache(cache_key)
         if cached_docs is not None:
             return cached_docs
 
-        print(f"\n[Cache Miss] 질문 '{query}'에 대한 RAG 파이프라인 실행 (OpenAI, {cache_key_params})")
+        print(f"\n[Cache Miss] 질문 '{query}'에 대한 RAG 파이프라인 실행 (OpenAI)")
         
         retrieved_docs = ensemble_retriever.invoke(query)
         print(f"하이브리드 검색 후 {len(retrieved_docs)}개 문장 선별 완료.")
@@ -106,13 +99,12 @@ def build_retriever(documents: list[LangChainDocument], rag_params: dict):
         reranked_docs = cohere_reranker.compress_documents(documents=retrieved_docs, query=query)
         print(f"Cohere Rerank 후 {len(reranked_docs)}개 문장 선별 완료.")
         
-        # 최종 문서 개수(final_docs_count)를 적용
         final_docs = [
             doc for doc in reranked_docs 
             if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_2_THRESHOLD
-        ][:final_docs_count]
+        ][:RAGConfig.FINAL_DOCS_COUNT]
 
-        print(f"최종 {len(final_docs)}개 문장 선별 완료 (상위 {final_docs_count}개).")
+        print(f"최종 {len(final_docs)}개 문장 선별 완료 (상위 {RAGConfig.FINAL_DOCS_COUNT}개).")
                 
         set_to_cache(cache_key, final_docs)
         
