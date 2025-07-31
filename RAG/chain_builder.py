@@ -102,6 +102,7 @@ def get_query_transformer_chain():
 def get_rag_chain_for_graph(system_prompt):
     """
     그래프용 RAG 체인을 구성합니다. 스트리밍을 지원합니다.
+    입력 딕셔너리에서 올바른 값을 선택하여 처리하도록 수정되었습니다.
     """
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1, streaming=True)
     rag_prompt_template = f"""{system_prompt}
@@ -120,11 +121,20 @@ def get_rag_chain_for_graph(system_prompt):
     rag_prompt = ChatPromptTemplate.from_template(rag_prompt_template)
 
     def format_docs(docs: list[LangChainDocument]) -> str:
+        """문서 리스트를 하나의 문자열로 합칩니다."""
         return "\n\n".join(doc.page_content for doc in docs)
 
-    return (
-        {"context": RunnableLambda(format_docs), "input": RunnablePassthrough()}
+    # RunnableParallel({})을 사용하여 각 키에 올바른 입력을 명시적으로 전달합니다.
+    rag_chain = (
+        {
+            # "context" 키에는: 입력(x)에서 "context"를 뽑아 format_docs 함수로 가공한 결과를 할당
+            "context": lambda x: format_docs(x["context"]),
+            # "input" 키에는: 입력(x)에서 "input"을 뽑아 그대로 할당
+            "input": lambda x: x["input"],
+        }
         | rag_prompt
         | llm
         | StrOutputParser()
     )
+    
+    return rag_chain
