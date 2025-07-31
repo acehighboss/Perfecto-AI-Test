@@ -6,7 +6,6 @@ from langchain_core.documents import Document
 
 # --- Redis 클라이언트 초기화 ---
 redis_client = None
-# (기존 코드와 동일)
 redis_url = os.getenv("REDIS_URL")
 try:
     if redis_url:
@@ -37,7 +36,6 @@ CACHE_TTL = 86400
 
 def get_from_cache(key: str) -> list[Document] | None:
     """지정된 키에 해당하는 캐시된 문서 리스트를 가져옵니다."""
-    # (기존 코드와 동일)
     if not redis_client:
         return None
     
@@ -53,7 +51,6 @@ def get_from_cache(key: str) -> list[Document] | None:
 
 def set_to_cache(key: str, value: list[Document]):
     """문서 리스트를 직렬화하여 Redis에 저장합니다."""
-    # (기존 코드와 동일)
     if not redis_client:
         return
 
@@ -63,12 +60,7 @@ def set_to_cache(key: str, value: list[Document]):
     print(f"📦 Cached result for key: {key}")
 
 def create_cache_key(prefix: str, content: str) -> str:
-    """
-    콘텐츠의 해시값을 기반으로 안정적인 캐시 키를 생성합니다.
-    prefix에 동적 파라미터가 포함될 수 있습니다.
-    """
+    """콘텐츠의 해시값을 기반으로 안정적인 캐시 키를 생성합니다."""
     # MD5 해시를 사용하여 일관된 길이의 키 생성
     content_hash = hashlib.md5(content.encode()).hexdigest()
-    # prefix 자체도 키의 일부로 사용
-    prefix_hash = hashlib.md5(prefix.encode()).hexdigest()
-    return f"cache:{prefix_hash}:{content_hash}"
+    return f"{prefix}:{content_hash}"
