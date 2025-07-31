@@ -1,18 +1,18 @@
 import subprocess
 import sys
-import time
-import json
-import streamlit as st
 
 # Streamlit Cloud 환경에 맞는 Playwright 브라우저 설치
+# 시스템 종속성은 packages.txt로 설치되므로, 여기서는 브라우저만 다운로드합니다.
 try:
     subprocess.run(
+        # --with-deps 옵션 제거
         [f"{sys.executable}", "-m", "playwright", "install"],
         check=True,
         capture_output=True,
         text=True
     )
 except subprocess.CalledProcessError as e:
+    # 오류 발생 시 로그를 명확하게 출력
     print("Playwright 브라우저 설치 실패. 에러 로그:")
     print(e.stdout)
     print(e.stderr)
@@ -21,6 +21,9 @@ except subprocess.CalledProcessError as e:
 import nest_asyncio
 nest_asyncio.apply()
 
+import streamlit as st
+import time
+import json
 from RAG.rag_pipeline import get_retriever_from_source
 from RAG.chain_builder import get_conversational_rag_chain, get_default_chain
 
@@ -44,7 +47,6 @@ if "system_prompt" not in st.session_state:
 # --- 사이드바 UI ---
 with st.sidebar:
     st.header("⚙️ 설정")
-
     with st.form("persona_form"):
         st.subheader("🤖 AI 페르소나 설정")
         system_prompt_input = st.text_area(
@@ -57,11 +59,11 @@ with st.sidebar:
             st.success("페르소나가 적용되었습니다!")
 
     st.divider()
-
+    
     with st.form("source_form"):
         st.subheader("🔎 분석 대상 설정")
         url_input = st.text_area("웹사이트 URL (한 줄에 하나씩 입력)", placeholder="https://news.google.com\nhttps://blog.google/...")
-
+        
         uploaded_files = st.file_uploader(
             "파일 업로드 (PDF, DOCX 등)",
             accept_multiple_files=True,
@@ -74,9 +76,8 @@ with st.sidebar:
 
             if source_type:
                 with st.spinner("문서를 병렬로 분석하고 RAG 파이프라인을 준비 중입니다..."):
-                    # 파라미터 전달 로직 제거
                     st.session_state.retriever = get_retriever_from_source(source_type, source_input)
-
+                
                 if st.session_state.retriever:
                     st.success("분석이 완료되었습니다! 이제 질문해보세요.")
                 else:
@@ -85,7 +86,6 @@ with st.sidebar:
                 st.warning("분석할 URL을 입력하거나 파일을 업로드해주세요.")
 
     st.divider()
-
     if st.button("대화 초기화"):
         st.session_state.clear()
         st.rerun()
@@ -113,22 +113,22 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
     try:
         with st.chat_message("assistant"):
             if st.session_state.retriever:
-                with st.spinner("관련 문서를 찾고 답변을 생성하고 있습니다..."):
+                with st.spinner("답변을 생성하고 있습니다..."):
                     processing_start_time = time.time()
-
+                    
+                    # 1. Retriever를 사용하여 관련 문서를 가져옵니다.
                     retrieved_docs = st.session_state.retriever.invoke(user_input)
-
+                    
+                    # 2. 가져온 문서로 RAG 체인을 실행합니다.
                     rag_chain = get_conversational_rag_chain(
-                        retriever=lambda x: retrieved_docs,
+                        retriever=lambda x: retrieved_docs, # 이미 가져온 문서를 그대로 사용
                         system_prompt=current_system_prompt
                     )
-
-                    response_stream = rag_chain.stream(user_input)
-                    ai_answer = st.write_stream(response_stream)
-
+                    ai_answer = rag_chain.invoke(user_input)
+                    
                     processing_time = time.time() - processing_start_time
 
-                with st.expander("자세한 출처 보기 (문장 단위)"):
+                    # --- 요청된 JSON 출력 형식에 맞게 재구성 ---
                     sources_by_url = {}
                     for doc in retrieved_docs:
                         url = doc.metadata.get("source", "N/A")
@@ -138,30 +138,39 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
                         if url not in sources_by_url:
                             sources_by_url[url] = {"url": url, "title": title, "sentences": []}
                         sources_by_url[url]["sentences"].append(sentence)
-
+                    
                     final_sources = list(sources_by_url.values())
 
-                    for source in final_sources:
-                        st.markdown(f"**- {source['title']}** ([링크]({source['url']}))")
-                        for sentence in source['sentences']:
-                            st.caption(f"    - {sentence}")
-                        st.divider()
+                    # 최종 결과 객체
+                    response_json = {
+                        "question": user_input,
+                        "answer": ai_answer,
+                        "sources": final_sources,
+                        "processing_time": f"{processing_time:.2f}초"
+                    }
 
-                st.caption(f"답변 생성 완료! (소요 시간: {processing_time:.2f}초)")
+                    # 화면에 표시
+                    st.markdown(response_json["answer"])
+                    with st.expander("자세한 출처 보기 (문장 단위)"):
+                        st.json(response_json) # 디버깅 및 확인용으로 JSON 전체 출력
+                        for source in response_json["sources"]:
+                            st.markdown(f"**- {source['title']}** ([링크]({source['url']}))")
+                            for sentence in source['sentences']:
+                                st.caption(f"    - {sentence}")
+                            st.divider()
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": ai_answer,
-                    "sources": final_sources
-                })
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response_json["answer"], 
+                        "sources": response_json["sources"]
+                    })
 
-            else:
-                with st.spinner("답변을 생성하고 있습니다..."):
-                    chain = get_default_chain(current_system_prompt)
-                    ai_answer = st.write_stream(chain.stream({"question": user_input}))
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": ai_answer, "sources": []}
-                    )
+            else: # RAG 파이프라인이 없는 경우
+                chain = get_default_chain(current_system_prompt)
+                ai_answer = st.write_stream(chain.stream({"question": user_input}))
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": ai_answer, "sources": []}
+                )
 
     except Exception as e:
         error_message = f"죄송합니다, 답변 생성 중 오류가 발생했습니다: {e}"
