@@ -40,7 +40,7 @@ def get_rag_graph(retriever, system_prompt):
         
         # LLM을 호출하여 관련성 점수를 매깁니다.
         response = retrieval_grader.invoke({"question": question, "documents": documents})
-        if response.binary_score == "yes":
+        if response['score'] == "yes":
             print("---판단: 문서 관련성 충분함---")
             return {"documents": documents, "messages": state["messages"]}
         else:
