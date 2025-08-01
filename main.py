@@ -111,7 +111,6 @@ for message in st.session_state.get("messages", []):
                         st.caption(f"    - {sentence}")
                     st.divider()
 
-
 if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
@@ -119,43 +118,51 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
 
     try:
         with st.chat_message("assistant"):
-            # ▼▼▼ [수정] 그래프 워크플로우를 실행합니다. ▼▼▼
             if st.session_state.graph:
                 with st.spinner("답변을 생성하고 있습니다... (필요시 추가 검색 수행)"):
                     start_time = time.time()
+
+                    # ▼▼▼ [수정] 그래프 실행 시, 매번 깨끗한 상태(State)로 시작하도록 입력값을 초기화합니다. ▼▼▼
+                    # 이전 대화의 documents나 generation이 다음 대화에 영향을 주지 않도록 합니다.
+                    inputs = {
+                        "messages": [HumanMessage(content=user_input)],
+                        "documents": [],
+                        "generation": "",
+                        "recursion_counter": 0
+                    }
+                    # ▲▲▲ 수정 완료 ▲▲▲
                     
-                    # 그래프 실행을 위한 입력값 설정
-                    inputs = {"messages": [HumanMessage(content=user_input)]}
                     final_answer = ""
                     final_sources = []
 
-                    # st.write_stream을 사용하여 그래프의 중간 및 최종 결과를 스트리밍합니다.
-                    for output in st.session_state.graph.stream(inputs):
+                    for output in st.session_state.graph.stream(inputs, {"recursion_limit": 5}): # 재귀 제한을 langgraph config로 설정
                         for key, value in output.items():
-                            if key == "generate": # 최종 답변 생성 단계
+                            if key == "generate":
                                 final_answer = value.get("generation")
+                                # 최종 생성 단계에서 사용된 문서만 출처로 사용합니다.
                                 final_sources = value.get("documents")
 
                     st.markdown(final_answer)
 
                     # 출처 표시
-                    with st.expander("자세한 출처 보기 (문장 단위)"):
-                        sources_by_url = {}
-                        for doc in final_sources:
-                            url = doc.metadata.get("source", "N/A")
-                            title = doc.metadata.get("title", "No Title")
-                            sentence = doc.page_content
+                    if final_sources: # 출처가 있을 경우에만 표시
+                        with st.expander("자세한 출처 보기 (문장 단위)"):
+                            sources_by_url = {}
+                            for doc in final_sources:
+                                url = doc.metadata.get("source", "N/A")
+                                title = doc.metadata.get("title", "No Title")
+                                sentence = doc.page_content
 
-                            if url not in sources_by_url:
-                                sources_by_url[url] = {"url": url, "title": title, "sentences": []}
-                            sources_by_url[url]["sentences"].append(sentence)
-                        
-                        final_sources_list = list(sources_by_url.values())
-                        for source in final_sources_list:
-                            st.markdown(f"**- {source['title']}** ([링크]({source['url']}))")
-                            for sentence in source['sentences']:
-                                st.caption(f"    - {sentence}")
-                            st.divider()
+                                if url not in sources_by_url:
+                                    sources_by_url[url] = {"url": url, "title": title, "sentences": []}
+                                sources_by_url[url]["sentences"].append(sentence)
+
+                            final_sources_list = list(sources_by_url.values())
+                            for source in final_sources_list:
+                                st.markdown(f"**- {source['title']}** ([링크]({source['url']}))")
+                                for sentence in source['sentences']:
+                                    st.caption(f"    - {sentence}")
+                                st.divider()
                     
                     processing_time = time.time() - start_time
                     st.caption(f"답변 생성 완료! (소요 시간: {processing_time:.2f}초)")
@@ -163,15 +170,16 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": final_answer,
-                        "sources": final_sources_list
+                        "sources": final_sources_list if final_sources else []
                     })
 
-            else: # RAG 파이프라인이 없는 경우
-                chain = get_default_chain(current_system_prompt)
-                ai_answer = st.write_stream(chain.stream({"question": user_input}))
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": ai_answer, "sources": []}
-                )
+            else: # RAG 파이프라인이 없는 경우 (기존과 동일)
+                with st.spinner("답변을 생성하고 있습니다..."):
+                    chain = get_default_chain(st.session_state.system_prompt)
+                    ai_answer = st.write_stream(chain.stream({"question": user_input}))
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": ai_answer, "sources": []}
+                    )
 
     except Exception as e:
         error_message = f"죄송합니다, 답변 생성 중 오류가 발생했습니다: {e}"
