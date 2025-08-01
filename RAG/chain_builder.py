@@ -67,17 +67,26 @@ def get_default_chain(system_prompt):
 # ▼▼▼ [신규] 문서 관련성 평가용 체인 ▼▼▼
 def get_retrieval_grader_chain():
     """
-    검색된 문서가 질문과 관련이 있는지 평가하는 체인을 생성합니다.
-    'yes' 또는 'no'의 이진 점수를 JSON 형식으로 반환합니다.
+    검색된 문서가 질문에 의미적으로 관련이 있는지 평가하는 체인을 생성합니다.
+    단순 키워드 매칭이 아닌, 질문에 대한 답변의 근거가 될 수 있는지를 판단합니다.
     """
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, format="json")
     prompt = PromptTemplate(
-        template="""You are a grader assessing relevance of a retrieved document to a user question. \n 
-        Here is the retrieved document: \n\n {documents} \n\n
-        Here is the user question: {question} \n
-        If the document contains keywords related to the user question, grade it as relevant. \n
-        Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question. \n
-        Provide the binary score as a JSON with a single key 'score' and no preamble or explanation.""",
+        template="""You are a grader assessing the semantic relevance of a retrieved document to a user question.
+        Your goal is to determine if the document contains information that could potentially answer the user's question, even if the wording is different.
+
+        Here is the retrieved document:
+        \n\n
+        {documents}
+        \n\n
+        Here is the user question: {question}
+        
+        Analyze the document and determine if it provides a direct answer, a partial answer, or a relevant clue to the user's question.
+        - If the document is directly or indirectly relevant to answering the question, grade it as "yes".
+        - If the document is completely irrelevant, grade it as "no".
+
+        Give a binary score 'yes' or 'no'. Your output must be a JSON with a single key 'score'. Do not provide any preamble or explanation.
+        """,
         input_variables=["question", "documents"],
     )
     return prompt | llm | JsonOutputParser()
