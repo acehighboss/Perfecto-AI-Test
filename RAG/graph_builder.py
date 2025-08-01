@@ -13,6 +13,7 @@ class GraphState(TypedDict):
     messages: List[BaseMessage] # 사용자의 질문
     documents: List[Document]   # 검색된 문서
     generation: str             # 최종 생성된 답변
+    recursion_counter: int # 재시도 횟수를 기록할 변수
 
 def get_rag_graph(retriever, system_prompt):
     """
@@ -28,6 +29,10 @@ def get_rag_graph(retriever, system_prompt):
     def retrieve(state: GraphState):
         """문서를 검색하는 노드"""
         print("---노드: 문서 검색---")
+        # ▼▼▼ [수정] 첫 실행 시 카운터 초기화 ▼▼▼
+        if "recursion_counter" not in state or not state["recursion_counter"]:
+            state["recursion_counter"] = 0
+            
         question = state["messages"][-1].content
         documents = retriever.invoke(question)
         return {"documents": documents, "messages": state["messages"]}
@@ -45,6 +50,9 @@ def get_rag_graph(retriever, system_prompt):
             return {"documents": documents, "messages": state["messages"]}
         else:
             print("---판단: 문서 관련성 불충분함, 질문 재생성 시도---")
+            # ▼▼▼ [수정] 재시도 횟수 1 증가 ▼▼▼
+            state["recursion_counter"] += 1
+            print(f"재시도 횟수: {state['recursion_counter']}")
             # 관련성이 없다고 판단되면, 다음 단계로 가기 위해 documents를 비웁니다.
             return {"documents": [], "messages": state["messages"]}
 
@@ -66,7 +74,11 @@ def get_rag_graph(retriever, system_prompt):
         print("---노드: 답변 생성---")
         question = state["messages"][-1].content
         documents = state["documents"]
-        generation = rag_chain.invoke({"context": documents, "input": question})
+        # ▼▼▼ [수정] 문서가 없을 경우, "정보를 찾을 수 없다"는 답변을 직접 생성 ▼▼▼
+        if not documents:
+            generation = "죄송합니다, 여러 번 시도했지만 질문에 답변하는 데 필요한 관련 정보를 찾을 수 없었습니다."
+        else:
+            generation = rag_chain.invoke({"context": documents, "input": question})
         return {"documents": documents, "messages": state["messages"], "generation": generation}
 
     # --- 그래프 엣지(흐름) 정의 ---
@@ -76,10 +88,16 @@ def get_rag_graph(retriever, system_prompt):
         답변을 생성할지, 아니면 질문을 다시 만들어 검색할지 결정하는 조건부 엣지
         """
         print("---엣지: 답변 생성 또는 추가 검색 결정---")
-        if not state["documents"]: # grade_documents 노드에서 관련성 없다고 판단한 경우
-            return "transform_query" # 질문 재생성 노드로 이동
+        # ▼▼▼ [수정] 재시도 횟수 제한 로직 추가 ▼▼▼
+        if not state["documents"]:
+            if state["recursion_counter"] >= 3: # 3번 이상 시도했으면
+                print("---판단: 재시도 횟수 초과, 답변 생성으로 이동---")
+                return "generate" # 포기하고 답변 생성 노드로 이동
+            else:
+                print("---판단: 추가 검색 시도---")
+                return "transform_query" # 재시도
         else:
-            return "generate" # 답변 생성 노드로 이동
+            return "generate" # 성공 시 답변 생성
 
     # --- 그래프 구성 ---
     workflow = StateGraph(GraphState)
