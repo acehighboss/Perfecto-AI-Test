@@ -4,6 +4,27 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+def get_keyword_generation_chain():
+    """
+    사용자의 질문에서 검색 키워드를 생성하는 LLM 체인을 구성합니다.
+    """
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+    
+    # 키워드 생성을 위한 새로운 프롬프트 템플릿
+    keyword_prompt_template = """당신은 사용자의 질문에서 효과적인 검색 키워드를 생성하는 전문 AI 어시스턴트입니다.
+아래 사용자의 질문을 분석하여, 질문의 핵심 내용과 가장 관련성이 높은 한국어 키워드 목록을 간결하게 추출해주세요.
+검색 범위를 넓히기 위해 동의어와 관련 개념도 고려할 수 있습니다.
+키워드는 쉼표로 구분된 리스트 형태로 제공해주세요.
+
+**사용자 질문:**
+{question}
+
+**키워드 (쉼표로 구분):**
+"""
+    keyword_prompt = ChatPromptTemplate.from_template(keyword_prompt_template)
+    
+    return keyword_prompt | llm | StrOutputParser()
+
 def get_conversational_rag_chain(retriever, system_prompt):
     """
     최종적으로 생성된 문장 단위의 출처를 사용하여 답변을 생성하는 RAG 체인을 구성합니다.
