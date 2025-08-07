@@ -25,7 +25,7 @@ import streamlit as st
 import time
 import json
 from RAG.rag_pipeline import get_retriever_from_source
-from RAG.chain_builder import get_conversational_rag_chain, get_default_chain
+from RAG.chain_builder import get_conversational_rag_chain, get_default_chain, get_keyword_generation_chain
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="Advanced RAG Chatbot", page_icon="⚙️")
@@ -116,10 +116,18 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
                 with st.spinner("답변을 생성하고 있습니다..."):
                     processing_start_time = time.time()
                     
-                    # 1. Retriever를 사용하여 관련 문서를 가져옵니다.
-                    retrieved_docs = st.session_state.retriever.invoke(user_input)
+                    # 1. 키워드 생성 체인을 실행하여 검색 키워드를 만듭니다.
+                    keyword_chain = get_keyword_generation_chain()
+                    generated_keywords = keyword_chain.invoke({"question": user_input})
                     
-                    # 2. 가져온 문서로 RAG 체인을 실행합니다.
+                    # 생성된 키워드를 화면에 표시하여 확인
+                    with st.expander("생성된 검색 키워드 보기"):
+                        st.info(generated_keywords)
+
+                    # 2. 생성된 키워드를 사용해 관련 문서를 가져옵니다.
+                    retrieved_docs = st.session_state.retriever.invoke(generated_keywords)
+                    
+                    # 3. 가져온 문서로 RAG 체인을 실행합니다. (답변 생성 시에는 원본 질문 사용)
                     rag_chain = get_conversational_rag_chain(
                         retriever=lambda x: retrieved_docs, # 이미 가져온 문서를 그대로 사용
                         system_prompt=current_system_prompt
@@ -176,3 +184,4 @@ if user_input := st.chat_input("궁금한 내용을 물어보세요!"):
         error_message = f"죄송합니다, 답변 생성 중 오류가 발생했습니다: {e}"
         st.error(error_message)
         st.session_state.messages.append({"role": "assistant", "content": error_message, "sources": []})
+
