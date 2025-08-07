@@ -30,9 +30,33 @@ async def _scrape_url_with_playwright(url: str) -> list[LangChainDocument]:
             for element in soup.select("script, style, nav, footer, aside, .ad, .advertisement, .banner, .menu, .header, .footer"):
                 element.decompose()
 
-            # 메인 콘텐츠 영역을 우선적으로 탐색하여 텍스트 추출
-            content_container = soup.find("main") or soup.find("article") or soup.find("div", class_="content") or soup.find("body")
-            cleaned_text = content_container.get_text(separator="\n", strip=True) if content_container else ""
+            # [수정] 메인 콘텐츠 영역을 더 구체적인 선택자(selector)로 탐색
+            # 일반적인 뉴스/블로그 사이트에서 본문이 위치할 가능성이 높은 영역을 순서대로 탐색합니다.
+            content_selectors = [
+                "article", 
+                "main", 
+                ".post-content", 
+                ".entry-content",
+                "#article-view-content-div", # 사이언스타임즈의 실제 본문 ID
+                ".article_body",
+                "#content",
+                "body" # 최후의 수단
+            ]
+            
+            content_container = None
+            for selector in content_selectors:
+                container = soup.select_one(selector)
+                if container:
+                    content_container = container
+                    # print(f"'{url}'에서 '{selector}' 선택자로 콘텐츠 영역을 찾았습니다.") # 디버깅용
+                    break
+            
+            # 텍스트 추출 (개행을 유지하며 불필요한 공백 제거)
+            if content_container:
+                lines = [line.strip() for line in content_container.get_text(separator='\n').splitlines() if line.strip()]
+                cleaned_text = "\n".join(lines)
+            else:
+                cleaned_text = ""
 
             if cleaned_text:
                 return [LangChainDocument(page_content=cleaned_text, metadata={"source": url, "title": title or "제목 없음"})]
