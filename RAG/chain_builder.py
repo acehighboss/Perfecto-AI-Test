@@ -33,9 +33,12 @@ def get_conversational_rag_chain(retriever, system_prompt):
     
     rag_prompt_template = f"""{system_prompt}
 
-Answer the user's request based *only* on the provided "Context".
-If the context does not contain the answer, say you don't know.
-Do not use any prior knowledge.
+You are a helpful AI assistant. Your primary goal is to provide a comprehensive and synthesized answer to the user's question based *only* on the provided "Context".
+Carefully analyze the user's question to understand its core intent.
+Then, thoroughly review all provided context snippets. Synthesize and connect pieces of information, even if they are from different sources, to form a complete picture.
+Instead of just listing facts, explain the significance and implications of the information as it relates to the user's question. If the context describes an event, explain its impact.
+Do not simply state "the information is not in the context" if a reasonable inference can be drawn from the provided text.
+Answer in Korean.
 
 **Context:**
 {{context}}
