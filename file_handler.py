@@ -524,3 +524,4 @@ def get_documents_from_uploaded_files(
             continue
 
     return docs
+
