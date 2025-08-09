@@ -10,10 +10,9 @@ from file_handler import (
     get_documents_from_urls_robust,
     get_documents_from_uploaded_files
 )
-from RAG.rag_pipeline import (
-    get_retriever_from_source,
-    get_conversational_rag_chain,
-)
+from RAG.rag_pipeline import get_retriever_from_source
+from RAG.chain_builder import get_conversational_rag_chain
+
 
 # ------------------------------------
 # Streamlit 기본 설정
@@ -197,3 +196,4 @@ with col_right:
                 st.markdown(f"- [{title}]({src})")
     else:
         st.caption("불러온 문서가 없습니다.")
+
