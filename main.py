@@ -1,6 +1,22 @@
-# main.py
+import os, subprocess, pathlib
 
-import os
+def ensure_playwright_browser():
+    flag = pathlib.Path("/tmp/.pw_chromium_installed")
+    if flag.exists():
+        return
+    try:
+        # --with-deps는 일부 환경에서 권한 제한이 있을 수 있어 생략
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium", "--timeout=600000"],
+            check=True
+        )
+        flag.touch()
+    except Exception as e:
+        # 설치 실패해도 앱은 계속 뜨게 하고, JS 렌더 옵션을 꺼두면 사용 가능
+        print(f"[warn] playwright chromium install failed: {e}")
+
+ensure_playwright_browser()
+
 import traceback
 import streamlit as st
 from typing import List, Any
@@ -218,3 +234,4 @@ with col_right:
                 st.markdown(f"- [{title}]({src})")
     else:
         st.caption("불러온 문서가 없습니다. 사이드바에서 URL을 입력하고 ‘URL 불러오기’를 눌러주세요.")
+
