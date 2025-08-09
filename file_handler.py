@@ -1,18 +1,26 @@
 # file_handler.py
 
 from __future__ import annotations
-import typing as t
+
+import io
+import os
 import re
 import time
-import io
+import tempfile
+import pathlib
+import typing as t
 from urllib.parse import urlparse
-import httpx
-from charset_normalizer import from_bytes
-from bs4 import BeautifulSoup
-from langchain_core.documents import Document
 from urllib import robotparser
 
-# 옵션 파서들
+import httpx
+from bs4 import BeautifulSoup
+from charset_normalizer import from_bytes
+from langchain_core.documents import Document
+
+# -----------------------------
+# Optional parsers (graceful)
+# -----------------------------
+# HTML content extractors
 try:
     import trafilatura
 except Exception:
@@ -33,18 +41,36 @@ try:
 except Exception:
     newspaper_fulltext = None
 
-# PDF
+# PDF extractors
 try:
     from pdfminer.high_level import extract_text as pdf_extract_text
 except Exception:
     pdf_extract_text = None
 
-# Playwright 존재 여부 확인
+# DOCX
+try:
+    import docx  # python-docx
+except Exception:
+    docx = None
+
+# Playwright (JS rendering)
 try:
     from playwright.sync_api import sync_playwright
 except Exception:
     sync_playwright = None
 
+# LlamaParse (for PDF high-fidelity parsing)
+try:
+    from llama_parse import LlamaParse
+except Exception:
+    LlamaParse = None
+
+LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY")
+
+
+# -----------------------------
+# Networking & heuristics
+# -----------------------------
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -55,8 +81,8 @@ DEFAULT_HEADERS = {
     "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
     "Cache-Control": "no-cache",
 }
-
 VALID_SCHEMES = {"http", "https"}
+
 
 def _is_valid_url(u: str) -> bool:
     try:
@@ -65,28 +91,28 @@ def _is_valid_url(u: str) -> bool:
     except Exception:
         return False
 
+
 def _robots_allowed(url: str, user_agent: str = DEFAULT_HEADERS["User-Agent"]) -> bool:
     try:
         p = urlparse(url)
         robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
         rp = robotparser.RobotFileParser()
-        # 타임아웃/에러 무시하고 관용적으로 허용하는 쪽으로
         rp.set_url(robots_url)
         rp.read()
         return rp.can_fetch(user_agent, url)
     except Exception:
-        # robots.txt에 접근 실패 시 과도한 차단 피하려면 True/False 선택 가능
+        # robots 접근 실패 시 관용적으로 허용
         return True
+
 
 def _http_fetch(url: str, timeout: float = 20.0, max_retries: int = 2) -> httpx.Response:
     last_exc = None
     for attempt in range(max_retries + 1):
         try:
             with httpx.Client(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=timeout) as client:
-                # HEAD로 컨텐츠 타입/길이 빠르게 체크(일부 서버는 HEAD 미지원)
+                # 일부 서버는 HEAD 미지원이므로 예외 무시
                 try:
-                    head = client.head(url)
-                    # 일부 서버가 405 주면 무시하고 GET 진행
+                    client.head(url)
                 except Exception:
                     pass
                 resp = client.get(url)
@@ -94,9 +120,9 @@ def _http_fetch(url: str, timeout: float = 20.0, max_retries: int = 2) -> httpx.
                 return resp
         except Exception as e:
             last_exc = e
-            # 소폭 백오프
             time.sleep(0.3 * (attempt + 1))
     raise last_exc if last_exc else RuntimeError("HTTP fetch failed")
+
 
 def _detect_encoding(content: bytes) -> str:
     try:
@@ -105,27 +131,18 @@ def _detect_encoding(content: bytes) -> str:
     except Exception:
         return "utf-8"
 
+
 def _looks_like_pdf(resp: httpx.Response, url: str) -> bool:
     ct = (resp.headers.get("Content-Type") or "").lower()
-    if "application/pdf" in ct:
-        return True
-    return url.lower().endswith(".pdf")
+    return "application/pdf" in ct or url.lower().endswith(".pdf")
 
-def _extract_pdf(resp: httpx.Response) -> str:
-    if not pdf_extract_text:
-        return ""
-    try:
-        bio = io.BytesIO(resp.content)
-        txt = pdf_extract_text(bio) or ""
-        return _clean_text(txt)
-    except Exception:
-        return ""
 
 def _clean_text(text: str) -> str:
     text = re.sub(r"\r", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
 
 def _title_from_html(soup: BeautifulSoup) -> str:
     if soup.title and soup.title.string:
@@ -135,18 +152,21 @@ def _title_from_html(soup: BeautifulSoup) -> str:
         return og["content"].strip()
     return ""
 
+
+# -----------------------------
+# HTML extraction pipeline
+# -----------------------------
 def _extract_with_trafilatura(html: str, url: str) -> t.Tuple[str, str]:
     if not trafilatura:
         return "", ""
     try:
-        # trafilatura는 html(str) 보다 URL을 직접 주면 내부 fetch를 다시 하기도 함
-        # 여기서는 이미 받은 html로 처리
         text = trafilatura.extract(html, include_links=False, include_comments=False, url=url) or ""
         meta = trafilatura.extract_metadata(html)
         title = meta.title if meta else ""
         return _clean_text(text), (title or "")
     except Exception:
         return "", ""
+
 
 def _extract_with_readability(html: str) -> t.Tuple[str, str]:
     if not ReadabilityDoc:
@@ -161,6 +181,7 @@ def _extract_with_readability(html: str) -> t.Tuple[str, str]:
     except Exception:
         return "", ""
 
+
 def _extract_with_boilerpy(html: str) -> t.Tuple[str, str]:
     if not bp_extractors:
         return "", ""
@@ -171,6 +192,7 @@ def _extract_with_boilerpy(html: str) -> t.Tuple[str, str]:
     except Exception:
         return "", ""
 
+
 def _extract_with_newspaper(html: str, url: str) -> t.Tuple[str, str]:
     if not newspaper_fulltext:
         return "", ""
@@ -180,11 +202,11 @@ def _extract_with_newspaper(html: str, url: str) -> t.Tuple[str, str]:
     except Exception:
         return "", ""
 
+
 def _extract_with_bs_heuristic(html: str) -> t.Tuple[str, str]:
     try:
         soup = BeautifulSoup(html, "html.parser")
         title = _title_from_html(soup)
-        # CMS별 흔한 본문 컨테이너 우선 순위
         selectors = [
             "article", "main", "[role=main]",
             ".entry-content", ".post-content", ".article-content",
@@ -196,7 +218,6 @@ def _extract_with_bs_heuristic(html: str) -> t.Tuple[str, str]:
             if node and node.get_text(strip=True):
                 candidates.append(node.get_text(separator="\n", strip=True))
         if not candidates:
-            # 폴백: 가장 긴 <p>들의 합
             ps = [p.get_text(separator=" ", strip=True) for p in soup.find_all("p")]
             text = "\n\n".join([p for p in ps if len(p) > 0])
         else:
@@ -205,23 +226,15 @@ def _extract_with_bs_heuristic(html: str) -> t.Tuple[str, str]:
     except Exception:
         return "", ""
 
-def _extract_title_fallback(html: str, title_now: str) -> str:
-    if title_now:
-        return title_now
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        return _title_from_html(soup)
-    except Exception:
-        return title_now
 
 def extract_readable_text(html: str, url: str) -> t.Tuple[str, str]:
     """
-    다중 파서 파이프라인:
-    1) trafilatura
-    2) readability-lxml
-    3) boilerpy3
-    4) newspaper3k
-    5) BeautifulSoup 휴리스틱
+    Multi-extractor pipeline:
+      1) trafilatura
+      2) readability-lxml
+      3) boilerpy3
+      4) newspaper3k
+      5) BeautifulSoup heuristic
     """
     # 1
     text, title = _extract_with_trafilatura(html, url)
@@ -256,20 +269,32 @@ def extract_readable_text(html: str, url: str) -> t.Tuple[str, str]:
 
     return text, _extract_title_fallback(html, title)
 
-# Playwright 렌더링
+
+def _extract_title_fallback(html: str, title_now: str) -> str:
+    if title_now:
+        return title_now
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        return _title_from_html(soup)
+    except Exception:
+        return title_now
+
+
+# -----------------------------
+# Playwright rendering
+# -----------------------------
 def render_with_playwright(
     url: str,
-    wait_until: str = "networkidle",   # "load" | "domcontentloaded" | "networkidle"
+    wait_until: str = "networkidle",  # "load" | "domcontentloaded" | "networkidle"
     wait_ms: int = 2500,
     timeout_ms: int = 20000,
     extra_ua: str | None = None,
 ) -> str:
     """
-    간단한 JS 렌더링. 페이지 로드 후 약간 대기한 뒤 최종 HTML을 반환.
+    Simple JS rendering to obtain post-hydration HTML.
     """
     if not sync_playwright:
         return ""
-
     content = ""
     try:
         with sync_playwright() as p:
@@ -278,7 +303,6 @@ def render_with_playwright(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.goto(url, wait_until=wait_until)
-            # 약간 더 대기(클라이언트 렌더/추가 요청)
             page.wait_for_timeout(wait_ms)
             content = page.content()
             browser.close()
@@ -286,20 +310,101 @@ def render_with_playwright(
         return ""
     return content or ""
 
+
+# -----------------------------
+# PDF extraction via LlamaParse
+# -----------------------------
+def _extract_pdf_with_llamaparse_from_path(path: str) -> str:
+    """
+    Use LlamaParse to get high-fidelity text/markdown from local PDF path.
+    """
+    if not LlamaParse or not LLAMA_CLOUD_API_KEY:
+        return ""
+    parser = LlamaParse(
+        api_key=LLAMA_CLOUD_API_KEY,
+        result_type="markdown",   # "text" possible; markdown preserves structure
+        max_timeout=600,
+    )
+    try:
+        docs = parser.load_data(path)  # returns list of llama-index Document
+        texts = []
+        for d in docs:
+            content = getattr(d, "text", "") or ""
+            if content:
+                texts.append(content)
+        return "\n\n".join(texts).strip()
+    except Exception:
+        return ""
+
+
+def _extract_pdf_with_llamaparse_from_bytes(data: bytes) -> str:
+    if not LlamaParse or not LLAMA_CLOUD_API_KEY:
+        return ""
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "uploaded.pdf"
+        p.write_bytes(data)
+        return _extract_pdf_with_llamaparse_from_path(str(p))
+
+
+# -----------------------------
+# Local fallbacks (files)
+# -----------------------------
+def _normalize_text(text: str) -> str:
+    return _clean_text(text)
+
+
+def _read_bytes_to_text(data: bytes) -> str:
+    try:
+        result = from_bytes(data).best()
+        enc = (result.encoding if result else "utf-8") or "utf-8"
+        return data.decode(enc, errors="replace")
+    except Exception:
+        return data.decode("utf-8", errors="replace")
+
+
+def _extract_from_pdf_bytes_local(data: bytes) -> str:
+    """Fallback PDF text extraction using pdfminer.six"""
+    if not pdf_extract_text:
+        return ""
+    try:
+        bio = io.BytesIO(data)
+        txt = pdf_extract_text(bio) or ""
+        return _normalize_text(txt)
+    except Exception:
+        return ""
+
+
+def _extract_from_docx_bytes(data: bytes) -> str:
+    if not docx:
+        return ""
+    try:
+        bio = io.BytesIO(data)
+        d = docx.Document(bio)
+        paras = [p.text for p in d.paragraphs if p.text and p.text.strip()]
+        txt = "\n".join(paras)
+        return _normalize_text(txt)
+    except Exception:
+        return ""
+
+
+# -----------------------------
+# Public API: URL → Documents
+# -----------------------------
 def get_documents_from_urls_robust(
     urls: t.List[str],
     *,
     respect_robots: bool = True,
     min_chars: int = 200,
     per_domain_delay: float = 0.2,
-    use_js_render: bool = False,          # JS 렌더링 토글
-    js_only_when_needed: bool = True,     # 정적 추출이 짧을 때만 JS 사용
+    use_js_render: bool = False,
+    js_only_when_needed: bool = True,
 ) -> t.List[Document]:
     """
-    - robots.txt 허용 시에만 수집(respect_robots=True)
-    - PDF 자동 처리
-    - 다중 파서로 본문 추출
-    - 필요 시 Playwright로 JS 렌더링 후 재시도
+    Robust URL ingestion:
+      - robots.txt check (optional)
+      - PDF → LlamaParse (fallback to pdfminer if needed)
+      - HTML → multi-extractor pipeline
+      - Optional JS rendering via Playwright
     """
     docs: t.List[Document] = []
     last_domain_ts: dict[str, float] = {}
@@ -309,47 +414,47 @@ def get_documents_from_urls_robust(
         if not url or not _is_valid_url(url):
             continue
 
-        # robots.txt 체크
         if respect_robots and not _robots_allowed(url):
-            # 허용되지 않으면 스킵
             continue
 
-        # 간단한 도메인 레이트리밋
+        # simple per-domain rate limiting
         netloc = urlparse(url).netloc
         now = time.time()
-        prev = last_domain_ts.get(netloc, 0)
+        prev = last_domain_ts.get(netloc, 0.0)
         if now - prev < per_domain_delay:
             time.sleep(per_domain_delay - (now - prev))
         last_domain_ts[netloc] = time.time()
 
-        # 1) HTTP로 먼저 시도
+        # fetch
         try:
             resp = _http_fetch(url)
         except Exception:
             resp = None
 
-        html = ""
-        title = ""
-        extracted_text = ""
-
-        # PDF?
+        # PDF path → LlamaParse
         if resp and _looks_like_pdf(resp, url):
-            text = _extract_pdf(resp)
+            text = ""
+            if resp.content:
+                # try LlamaParse
+                text = _extract_pdf_with_llamaparse_from_bytes(resp.content)
+                # fallback: local pdfminer
+                if not text:
+                    text = _extract_from_pdf_bytes_local(resp.content)
             if text and len(text) >= min_chars:
                 docs.append(Document(page_content=text, metadata={"source": url, "title": url}))
             continue
 
-        # 정적 HTML 추출 시도
+        # HTML extraction
+        html, title, extracted_text = "", "", ""
         if resp is not None:
             enc = _detect_encoding(resp.content)
             try:
                 html = resp.content.decode(enc, errors="replace")
             except Exception:
                 html = resp.text
-
             extracted_text, title = extract_readable_text(html, url)
 
-        # 2) (옵션) 정적 추출이 짧으면 JS 렌더링 시도
+        # JS rendering if needed
         need_js = use_js_render and (not extracted_text or len(extracted_text) < min_chars)
         if need_js and (not js_only_when_needed or (js_only_when_needed and (not extracted_text or len(extracted_text) < min_chars))):
             rendered_html = render_with_playwright(url)
@@ -359,11 +464,63 @@ def get_documents_from_urls_robust(
                     extracted_text, title = t2, (title or tt2)
 
         if extracted_text and len(extracted_text) >= min_chars:
-            docs.append(
-                Document(
-                    page_content=extracted_text,
-                    metadata={"source": url, "title": title or url}
+            docs.append(Document(page_content=extracted_text, metadata={"source": url, "title": title or url}))
+
+    return docs
+
+
+# -----------------------------
+# Public API: Files → Documents
+# -----------------------------
+def get_documents_from_uploaded_files(
+    files: t.List,  # List[UploadedFile]
+    *,
+    min_chars: int = 100,
+) -> t.List[Document]:
+    """
+    Convert uploaded files into LangChain Documents.
+      - PDF: LlamaParse, fallback to pdfminer
+      - DOCX: python-docx
+      - TXT/MD/CSV/LOG/JSON: best-effort decode
+    """
+    docs: t.List[Document] = []
+    if not files:
+        return docs
+
+    for uf in files:
+        try:
+            name = getattr(uf, "name", "uploaded")
+            suffix = (name.split(".")[-1] if "." in name else "").lower()
+            raw = uf.read()
+            text = ""
+
+            if suffix == "pdf":
+                text = _extract_pdf_with_llamaparse_from_bytes(raw) or _extract_from_pdf_bytes_local(raw)
+
+            elif suffix in {"docx"}:
+                text = _extract_from_docx_bytes(raw)
+
+            elif suffix in {"txt", "md", "csv", "log", "json"}:
+                text = _normalize_text(_read_bytes_to_text(raw))
+
+            else:
+                # unknown binary → try as text
+                text = _normalize_text(_read_bytes_to_text(raw))
+
+            if text and len(text) >= min_chars:
+                docs.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": f"uploaded:{name}",
+                            "title": name,
+                            "filename": name,
+                            "kind": "file",
+                        },
+                    )
                 )
-            )
+        except Exception:
+            # skip individual failures
+            continue
 
     return docs
