@@ -11,10 +11,9 @@ from file_handler import (
     get_documents_from_urls_robust,
     get_documents_from_uploaded_files,
 )
-from RAG.rag_pipeline import (
-    get_retriever_from_source,
-    get_conversational_rag_chain,  # rag_pipeline에 shim 추가했던 것 사용
-)
+from RAG.rag_pipeline import get_retriever_from_source
+from RAG.chain_builder import get_conversational_rag_chain
+
 
 # -----------------------------
 # 유틸: 간단한 문장 분할 & 서포트 문장 추출
@@ -252,3 +251,4 @@ if user_query and st.session_state.ready_to_analyze and st.session_state.docs:
 
 elif user_query and not st.session_state.ready_to_analyze:
     st.warning("먼저 좌측에서 URL/파일을 불러오세요.")
+
