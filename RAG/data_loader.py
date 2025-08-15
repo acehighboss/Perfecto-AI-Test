@@ -1,5 +1,3 @@
-# RAG/data_loader.py
-
 from __future__ import annotations
 from typing import List, Literal, Any
 
