@@ -1,4 +1,3 @@
-# main.py
 import traceback
 import streamlit as st
 from typing import List, Any, Dict
@@ -186,3 +185,4 @@ if user_query := st.chat_input("여기에 질문을 입력하세요"):
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
             st.caption(traceback.format_exc())
+
