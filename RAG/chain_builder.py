@@ -1,174 +1,88 @@
-from __future__ import annotations
-from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass
+from langchain_core.documents import Document as LangChainDocument
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-from langchain_core.documents import Document
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-
-
-# LLM 팩토리
-def _default_llm(model: Optional[str] = None, temperature: float = 0.2) -> ChatOpenAI:
+def get_keyword_generation_chain():
     """
-    모델/온도 기본값을 한 곳에서 관리.
-    환경변수로 OPENAI_API_KEY가 설정되어 있어야 합니다.
+    사용자의 질문에서 검색 키워드를 생성하는 LLM 체인을 구성합니다.
     """
-    model = model or "gpt-4o-mini"  # 필요 시 프로젝트 표준 모델로 교체
-    return ChatOpenAI(model=model, temperature=temperature)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+    
+    # 키워드 생성을 위한 새로운 프롬프트 템플릿
+    keyword_prompt_template = """당신은 사용자의 질문에서 효과적인 검색 키워드를 생성하는 전문 AI 어시스턴트입니다.
+아래 사용자의 질문을 분석하여, 질문의 핵심 내용과 가장 관련성이 높은 한국어 키워드 목록을 간결하게 추출해주세요.
+검색 범위를 넓히기 위해 동의어와 관련 개념도 고려할 수 있습니다.
+키워드는 쉼표로 구분된 리스트 형태로 제공해주세요.
 
+**사용자 질문:**
+{question}
 
-# 유틸
-def _format_docs(docs: List[Document]) -> str:
-    """
-    RAG 컨텍스트용 텍스트 포맷.
-    문서가 PDF/YouTube 등일 때 page/timecode 같은 메타데이터가
-    이미 채워져있다면 아래처럼 간단히 붙여도 충분합니다.
-    """
-    lines = []
-    for i, d in enumerate(docs, 1):
-        src = (d.metadata or {}).get("source", "")
-        page = (d.metadata or {}).get("page", None)
-        # page/timecode 등 추가 메타가 있으면 보기 좋게 포함
-        tag = f"{src}" + (f" (p.{page})" if page is not None else "")
-        content = (d.page_content or "").strip()
-        if content:
-            lines.append(f"[{i}] Source: {tag}\n{content}")
-    return "\n\n".join(lines)
-
-
-def _collect_sources(docs: List[Document]) -> List[Dict[str, Any]]:
-    """
-    UI의 '소스 미리보기'에 바로 먹일 수 있도록 간단한 메타 형태로 반환.
-    """
-    out = []
-    for d in docs:
-        meta = d.metadata or {}
-        out.append({
-            "source": meta.get("source"),
-            "page": meta.get("page"),
-            "title": meta.get("title"),
-            "type": meta.get("type"),   # "pdf", "web", "youtube" 등 체계화했다면 표시
-            "snippet": (d.page_content or "")[:240],
-        })
-    return out
-
-
-# 체인 정의
-SYSTEM_RAG = """\
-You are a careful research assistant. Use ONLY the provided context to answer.
-If the context is thin or incomplete, say so and keep the answer conservative.
-Cite specific details from the context where possible (but don't invent citations).
-Keep answers concise, structured, and neutral.
+**키워드 (쉼표로 구분):**
 """
+    keyword_prompt = ChatPromptTemplate.from_template(keyword_prompt_template)
+    
+    return keyword_prompt | llm | StrOutputParser()
 
-PROMPT_RAG = ChatPromptTemplate.from_messages(
-    [
-        SystemMessage(content=SYSTEM_RAG),
-        MessagesPlaceholder(variable_name="history"),   # 대화형이면 사용
-        ("human", "Question:\n{question}\n\nContext:\n{context}\n\nAnswer in Korean."),
-    ]
-)
+def get_conversational_rag_chain(retriever, system_prompt):
+    """
+    최종적으로 생성된 문장 단위의 출처를 사용하여 답변을 생성하는 RAG 체인을 구성합니다.
+    """
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+    
+    rag_prompt_template = f"""{system_prompt}
 
-SYSTEM_DEFAULT = """\
-You are a helpful assistant. If you lack sources, answer with general knowledge,
-but clearly state that you did not find enough evidence in the provided documents.
-Keep the answer concise and practical. Answer in Korean.
+You are a helpful AI assistant. Your primary goal is to provide a comprehensive and synthesized answer to the user's question based *only* on the provided "Context".
+Carefully analyze the user's question to understand its core intent.
+Then, thoroughly review all provided context snippets. Synthesize and connect pieces of information, even if they are from different sources, to form a complete picture.
+Instead of just listing facts, explain the significance and implications of the information as it relates to the user's question. If the context describes an event, explain its impact.
+Do not simply state "the information is not in the context" if a reasonable inference can be drawn from the provided text.
+Answer in Korean.
+
+**Context:**
+{{context}}
+
+**User's Request:**
+{{input}}
+
+**Answer (in Korean):**
 """
+    rag_prompt = ChatPromptTemplate.from_template(rag_prompt_template)
+    
+    def format_docs_with_metadata(docs: list[LangChainDocument]) -> str:
+        """문서 리스트를 LLM 프롬프트 형식에 맞게 변환합니다."""
+        if not docs:
+            return "No context provided."
+        
+        sources = {}
+        for doc in docs:
+            source_url = doc.metadata.get("source", "Unknown Source")
+            title = doc.metadata.get("title", "No Title")
+            key = (source_url, title)
+            if key not in sources:
+                sources[key] = []
+            sources[key].append(doc.page_content)
 
-PROMPT_DEFAULT = ChatPromptTemplate.from_messages(
-    [
-        SystemMessage(content=SYSTEM_DEFAULT),
-        ("human", "{question}"),
-    ]
-)
+        formatted_string = ""
+        for (source_url, title), sentences in sources.items():
+            formatted_string += f"\n--- Source: {title} ({source_url}) ---\n"
+            formatted_string += "\n".join(f"- {s}" for s in sentences)
 
+        return formatted_string.strip()
 
-# 호출 형태를 `.invoke({"question": ...})`로 맞추기 위한 간단한 래퍼
-class _SimpleInvoke:
-    def __init__(self, fn):
-        self._fn = fn
-    def invoke(self, inputs: Dict[str, Any]) -> Any:
-        return self._fn(inputs)
+    rag_chain = (
+        {"context": retriever | RunnableLambda(format_docs_with_metadata), "input": RunnablePassthrough()}
+        | rag_prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    return rag_chain
 
-
-def get_default_chain(llm: Optional[ChatOpenAI] = None) -> _SimpleInvoke:
-    """
-    문서 컨텍스트 없이 일반 지식으로 답하는 기본 체인.
-    """
-    llm = llm or _default_llm()
-    def _run(inputs: Dict[str, Any]) -> str:
-        q = inputs.get("question") or inputs.get("query") or ""
-        msgs = PROMPT_DEFAULT.format_messages(question=q)
-        resp = llm.invoke(msgs)
-        return resp.content
-    return _SimpleInvoke(_run)
-
-
-def get_conversational_rag_chain(
-    retriever,
-    llm: Optional[ChatOpenAI] = None,
-    return_sources: bool = True,
-) -> _SimpleInvoke:
-    """
-    기존 코드 호환: `.invoke({"question": ...})` 로 호출.
-    - retriever는 search_type='similarity' 기반 SmartRetriever 래핑 인스턴스여야 함
-    - return_sources=True일 때, {"answer": str, "sources": list} 를 반환
-      (False면 answer str 만 반환)
-    """
-    llm = llm or _default_llm()
-
-    def _run(inputs: Dict[str, Any]):
-        question = inputs.get("question") or inputs.get("query") or ""
-        history = inputs.get("history", [])  # [HumanMessage, AIMessage, ...] 형태면 그대로 사용
-
-        # 1) 문서 검색
-        docs: List[Document] = retriever.get_relevant_documents(question)
-
-        # 2) 문서가 없거나 빈 내용뿐이면 바로 폴백 (과도한 "사과" 방지)
-        nonempty_docs = [d for d in docs if (d and (d.page_content or "").strip())]
-        if not nonempty_docs:
-            default_chain = get_default_chain(llm=llm)
-            ans = default_chain.invoke({"question": question})
-            ans = "⚠️ 업로드 문서에서 직접적인 근거를 충분히 찾지 못했습니다.\n\n" + (ans or "")
-            return {"answer": ans, "sources": []} if return_sources else ans
-
-        # 3) 컨텍스트 생성
-        context_text = _format_docs(nonempty_docs)
-
-        # 4) LLM 호출
-        msgs = PROMPT_RAG.format_messages(
-            history=history,
-            question=question,
-            context=context_text,
-        )
-        resp = llm.invoke(msgs)
-        answer_text = resp.content
-
-        if return_sources:
-            return {
-                "answer": answer_text,
-                "sources": _collect_sources(nonempty_docs),
-            }
-        else:
-            return answer_text
-
-    return _SimpleInvoke(_run)
-
-
-# ----------------------------
-# 헬퍼: 고수준 폴백 일괄 처리 진입점 (선택 사용)
-# ----------------------------
-def answer_with_fallback(
-    retriever,
-    question: str,
-    history: Optional[List[Any]] = None,
-    llm: Optional[ChatOpenAI] = None,
-) -> Dict[str, Any]:
-    """
-    간단 진입점:
-    - RAG 컨텍스트가 충분하면 RAG로,
-    - 부족하면 default로 자동 폴백.
-    """
-    rag_chain = get_conversational_rag_chain(retriever, llm=llm, return_sources=True)
-    return rag_chain.invoke({"question": question, "history": history or []})
+def get_default_chain(system_prompt):
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("user", "{question}")]
+    )
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
+    return prompt | llm | StrOutputParser()
