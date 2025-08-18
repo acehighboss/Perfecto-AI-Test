@@ -1,86 +1,62 @@
-import spacy
+# RAG/retriever_builder.py
+
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.runnables import RunnableLambda
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
-from langchain_cohere import CohereRerank
+from langchain_cohere import CohereRank
 from langchain.retrievers import EnsembleRetriever
+# ★★★ 새로운 텍스트 분할기 임포트 ★★★
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from .rag_config import RAGConfig
 from .redis_cache import get_from_cache, set_to_cache, create_cache_key
 
-# spaCy 언어 모델 로드
-try:
-    nlp_korean = spacy.load("ko_core_news_sm")
-    nlp_english = spacy.load("en_core_web_sm")
-    print("✅ spaCy language models loaded successfully.")
-except OSError:
-    print("⚠️ spaCy 모델을 찾을 수 없습니다. 'requirements.txt'를 확인하세요.")
-    nlp_korean, nlp_english = None, None
-
-def _split_documents_into_sentences(documents: list[LangChainDocument]) -> list[LangChainDocument]:
-    """문서 리스트를 spaCy를 이용해 문장 단위로 분할합니다."""
-    sentences = []
-    if not nlp_korean or not nlp_english:
-        return documents
-
-    for doc in documents:
-        if not doc.page_content or not doc.page_content.strip():
-            continue
-        
-        # 언어 감지 휴리스틱 (한국어/영어)
-        try:
-            is_korean = sum('가' <= c <= '힣' for c in doc.page_content[:200]) > 10
-            nlp = nlp_korean if is_korean else nlp_english
-            nlp_doc = nlp(doc.page_content)
-        except Exception:
-            continue
-
-        for sent in nlp_doc.sents:
-            if sent.text.strip():
-                sentences.append(LangChainDocument(page_content=sent.text.strip(), metadata=doc.metadata.copy()))
-    
-    return sentences
-
-
 def build_retriever(documents: list[LangChainDocument]):
     """
-    문서를 문장 단위로 분해하고, 하이브리드 검색(BM25 + FAISS) 및 Rerank를 수행하는
-    전체 RAG 파이프라인을 구성합니다.
+    문서를 의미 있는 청크로 분할하고, 하이브리드 검색 및 Rerank를 수행하는
+    RAG 파이프라인을 구성합니다.
     """
     if not documents:
         return None
 
-    # 1. 문서 전체를 문장으로 분할
-    sentences = _split_documents_into_sentences(documents)
-    if not sentences:
+    # ★★★ 1. RecursiveCharacterTextSplitter를 사용한 문서 분할 ★★★
+    # 기존의 문장 단위 분할 대신, 맥락을 유지하는 청크 단위로 분할합니다.
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=RAGConfig.CHUNK_SIZE,
+        chunk_overlap=RAGConfig.CHUNK_OVERLAP,
+        length_function=len,
+        is_separator_regex=False,
+    )
+    chunks = text_splitter.split_documents(documents)
+    
+    if not chunks:
+        print("분할된 청크가 없어 Retriever를 생성할 수 없습니다.")
         return None
-    print(f"총 {len(sentences)}개의 문장 생성 완료.")
+    print(f"총 {len(chunks)}개의 청크 생성 완료.")
 
     # 2. 임베딩 및 벡터 저장소(FAISS) 생성
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002") 
+    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
     try:
-        vectorstore = FAISS.from_documents(sentences, embeddings)
-        # FAISS가 가져오는 문서 수를 늘림
+        vectorstore = FAISS.from_documents(chunks, embeddings)
         faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": RAGConfig.FAISS_TOP_K})
     except Exception as e:
         print(f"FAISS 인덱스 생성 실패: {e}")
         return None
-    
+
     # 3. 키워드 기반 검색(BM25) Retriever 생성
-    bm25_retriever = BM25Retriever.from_documents(sentences)
+    bm25_retriever = BM25Retriever.from_documents(chunks)
     bm25_retriever.k = RAGConfig.BM25_TOP_K
 
     # 4. 하이브리드 검색을 위한 EnsembleRetriever 생성
-    # ★★ BM25(키워드) 가중치를 높여 질문의 핵심 단어가 포함된 문장을 더 잘 찾도록 수정 ★★
     ensemble_retriever = EnsembleRetriever(
         retrievers=[bm25_retriever, faiss_retriever],
-        weights=[0.7, 0.3] # BM25 가중치 상향
+        weights=[0.6, 0.4]  # 키워드 검색에 약간 더 가중치 부여
     )
 
     # 5. Cohere Rerank 압축기 설정
-    cohere_reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_TOP_N)
+    cohere_reranker = CohereRank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_TOP_N)
 
     # 6. 최종 파이프라인 체인 구성
     def get_cached_or_run_pipeline(query: str):
@@ -96,22 +72,17 @@ def build_retriever(documents: list[LangChainDocument]):
         # Reranker를 통해 관련성 높은 순으로 정렬 및 압축
         reranked_docs = cohere_reranker.compress_documents(documents=retrieved_docs, query=query)
         
-        # ★★ 필터링 로직 수정 ★★
-        # 관련성 점수가 임계값 이상인 문서만 선택하되,
-        # 만약 그런 문서가 하나도 없다면 가장 점수가 높은 상위 문서를 최소한으로 포함
-        high_relevance_docs = [
+        # 관련성 점수가 임계값 이상인 문서만 필터링
+        final_docs = [
             doc for doc in reranked_docs 
             if doc.metadata.get('relevance_score', 0) >= RAGConfig.RERANK_THRESHOLD
-        ]
-        
-        if not high_relevance_docs and reranked_docs:
-            # 임계값을 넘는 문서가 없으면, 가장 점수 높은 문서를 최소한으로 포함
-            final_docs = reranked_docs[:RAGConfig.FINAL_DOCS_COUNT_FALLBACK]
-        else:
-            # 임계값을 넘는 문서가 있으면, 그 중에서 최종 개수만큼 선택
-            final_docs = high_relevance_docs[:RAGConfig.FINAL_DOCS_COUNT]
+        ][:RAGConfig.FINAL_DOCS_COUNT]
 
-        print(f"최종 {len(final_docs)}개 문장 선별 완료.")
+        # 만약 필터링 후 문서가 하나도 없다면, Rerank 결과의 최상위 문서를 사용 (Fallback)
+        if not final_docs and reranked_docs:
+            final_docs = reranked_docs[:RAGConfig.FINAL_DOCS_COUNT_FALLBACK]
+
+        print(f"최종 {len(final_docs)}개 청크 선별 완료.")
         
         set_to_cache(cache_key, final_docs)
         
