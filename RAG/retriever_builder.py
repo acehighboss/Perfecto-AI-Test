@@ -5,7 +5,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
-from langchain_cohere import CohereRank
+from langchain_cohere import CohereRerank
 from langchain.retrievers import EnsembleRetriever
 # ★★★ 새로운 텍스트 분할기 임포트 ★★★
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -56,7 +56,7 @@ def build_retriever(documents: list[LangChainDocument]):
     )
 
     # 5. Cohere Rerank 압축기 설정
-    cohere_reranker = CohereRank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_TOP_N)
+    cohere_reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=RAGConfig.RERANK_TOP_N)
 
     # 6. 최종 파이프라인 체인 구성
     def get_cached_or_run_pipeline(query: str):
