@@ -8,7 +8,6 @@ from file_handler import (
     get_documents_from_urls_robust,
     get_documents_from_uploaded_files,
 )
-from RAG.rag_pipeline import get_retriever_from_documents
 from RAG.chain_builder import get_conversational_rag_chain
 
 # Streamlit 기본 설정
@@ -126,20 +125,14 @@ if user_query := st.chat_input("여기에 질문을 입력하세요"):
             st.write(user_query)
 
         try:
-            # 오류가 발생했던 부분을 수정된 함수 호출로 변경합니다.
-            retriever = get_retriever_from_documents(st.session_state.docs)
+            # ★★ 체인 생성 시 Retriever 대신 전체 문서와 시스템 프롬프트를 전달 ★★
+            chain = get_conversational_rag_chain(st.session_state.docs, system_prompt)
             
-            if retriever:
-                chain = get_conversational_rag_chain(retriever, system_prompt)
-                with st.spinner("답변을 생성하는 중입니다..."):
-                    # 체인에 사용자 질문만 전달합니다.
-                    result = chain.invoke(user_query)
-                
-                answer_text = result.get("answer", "답변을 생성하지 못했습니다.")
-                source_docs = result.get("source_documents", [])
-            else:
-                answer_text = "Retriever를 생성하는 데 실패했습니다. 문서를 다시 불러와 주세요."
-                source_docs = []
+            with st.spinner("답변을 생성하는 중입니다..."):
+                result = chain.invoke(user_query)
+            
+            answer_text = result.get("answer", "답변을 생성하지 못했습니다.")
+            source_docs = result.get("source_documents", [])
 
             st.session_state.messages.append(AIMessage(content=answer_text))
             st.session_state.last_answer = answer_text
