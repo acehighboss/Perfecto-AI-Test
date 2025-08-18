@@ -53,7 +53,7 @@ except Exception:
 
 # Playwright (JS rendering)
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 except Exception:
     sync_playwright = None
 
@@ -227,12 +227,7 @@ def _extract_with_bs_heuristic(html: str) -> t.Tuple[str, str]:
 
 def extract_readable_text(html: str, url: str) -> t.Tuple[str, str]:
     """
-    Multi-extractor pipeline:
-      1) trafilatura
-      2) readability-lxml
-      3) boilerpy3
-      4) newspaper3k
-      5) BeautifulSoup heuristic
+    Multi-extractor pipeline for static HTML.
     """
     # 1
     text, title = _extract_with_trafilatura(html, url)
@@ -277,35 +272,122 @@ def _extract_title_fallback(html: str, title_now: str) -> str:
     except Exception:
         return title_now
 
+# ---------------------------------------------
+# ADVANCED PLAYWRIGHT RENDERING & EXTRACTION
+# ---------------------------------------------
 
-# -----------------------------
-# Playwright rendering
-# -----------------------------
-def render_with_playwright(
+JS_PRE_CLEAN_PAGE = """
+() => {
+    const kill = (sel) => document.querySelectorAll(sel).forEach(el => el.remove());
+
+    // Kill common noise elements
+    kill('header, nav, aside, footer');
+    kill('.sidebar, .side, .widget, .trending, .related, .recommend, .recommended');
+    kill('.ad, .ads, [class*="ad-"], [id*="ad"], .banner, .popup, .modal, .newsletter, .subscribe');
+    kill('.share, .sns, .social, .breadcrumb, .cookie, .toast, .sticky, .floating');
+    kill('#comments, .comments, [id*="comment"]');
+
+    // Kill accessibility skip links
+    kill('a.skip-link, a[href="#content"], a[href="#main"]');
+
+    // Kill content-blocking overlays
+    kill('[style*="position: fixed"][style*="z-index:"][style*="background:"]');
+
+    // Heuristically remove recommendation blocks
+    Array.from(document.querySelectorAll('section, div')).forEach(el => {
+      const t = (el.textContent || '').trim();
+      if (!t) return;
+      const first = (t.split('\\n')[0] || '').trim();
+      if (t.startsWith('추천 콘텐츠')) el.remove();
+      if (/^관련(기사|글)|^많이 본|^인기/.test(first)) el.remove();
+    });
+}
+"""
+
+JS_CLICK_READ_MORE = """
+async () => {
+    const selectors = ['button', 'a'];
+    const keywords = ['더보기', '더 보기', 'read more', 'load more', 'continue reading'];
+    for (const el of document.querySelectorAll(selectors.join(','))) {
+        const t = (el.innerText || '').trim().toLowerCase();
+        if (t && keywords.some(k => t.includes(k))) {
+            el.click();
+            await new Promise(r => setTimeout(r, 300)); // wait a bit after click
+        }
+    }
+}
+"""
+
+JS_AUTO_SCROLL = """
+async (duration) => {
+    const start = Date.now();
+    const step = () => {
+        window.scrollBy(0, 250);
+        if (Date.now() - start < duration) requestAnimationFrame(step);
+    };
+    step();
+}
+"""
+
+def _interact_and_clean_page(page: "Page"):
+    """Run a sequence of interactions and cleanups on the page."""
+    try:
+        page.evaluate(JS_PRE_CLEAN_PAGE)
+        time.sleep(0.2)
+        page.evaluate(JS_CLICK_READ_MORE)
+        time.sleep(0.5)
+        page.evaluate(JS_AUTO_SCROLL, 1500)
+        time.sleep(1.5)
+        page.evaluate(JS_PRE_CLEAN_PAGE) # Clean again after interactions
+    except Exception:
+        # Errors during interaction are not fatal
+        pass
+
+def render_with_playwright_robust(
     url: str,
-    wait_until: str = "networkidle",  # "load" | "domcontentloaded" | "networkidle"
-    wait_ms: int = 2500,
-    timeout_ms: int = 20000,
+    wait_until: str = "domcontentloaded",
+    wait_ms: int = 2000,
+    timeout_ms: int = 25000,
     extra_ua: str | None = None,
 ) -> str:
     """
-    Simple JS rendering to obtain post-hydration HTML.
+    Advanced JS rendering with pre-cleaning and interaction.
     """
     if not sync_playwright:
         return ""
+    
     content = ""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=extra_ua or DEFAULT_HEADERS["User-Agent"])
+            context = browser.new_context(
+                user_agent=extra_ua or DEFAULT_HEADERS["User-Agent"],
+                # Block assets for speed
+                java_script_enabled=True,
+                route_intercept_handler=lambda route: route.abort() if route.request.resource_type in {
+                    'image', 'stylesheet', 'font', 'media', 'manifest'
+                } else route.continue_(),
+            )
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
-            page.goto(url, wait_until=wait_until)
+            
+            try:
+                page.goto(url, wait_until=wait_until)
+            except PlaywrightTimeoutError:
+                # Fallback to 'load' on timeout
+                page.goto(url, wait_until="load")
+
+            _interact_and_clean_page(page)
+            
+            # Final wait to ensure scripts have run
             page.wait_for_timeout(wait_ms)
+            
             content = page.content()
             browser.close()
-    except Exception:
+    except Exception as e:
+        print(f"Playwright rendering failed for {url}: {e}")
         return ""
+        
     return content or ""
 
 
@@ -313,23 +395,16 @@ def render_with_playwright(
 # PDF extraction via LlamaParse
 # -----------------------------
 def _extract_pdf_with_llamaparse_from_path(path: str) -> str:
-    """
-    Use LlamaParse to get high-fidelity text/markdown from local PDF path.
-    """
     if not LlamaParse or not LLAMA_CLOUD_API_KEY:
         return ""
     parser = LlamaParse(
         api_key=LLAMA_CLOUD_API_KEY,
-        result_type="markdown",   # "text" possible; markdown preserves structure
+        result_type="markdown",
         max_timeout=600,
     )
     try:
-        docs = parser.load_data(path)  # returns list of llama-index Document
-        texts = []
-        for d in docs:
-            content = getattr(d, "text", "") or ""
-            if content:
-                texts.append(content)
+        docs = parser.load_data(path)
+        texts = [getattr(d, "text", "") or "" for d in docs if getattr(d, "text", "")]
         return "\n\n".join(texts).strip()
     except Exception:
         return ""
@@ -361,7 +436,6 @@ def _read_bytes_to_text(data: bytes) -> str:
 
 
 def _extract_from_pdf_bytes_local(data: bytes) -> str:
-    """Fallback PDF text extraction using pdfminer.six"""
     if not pdf_extract_text:
         return ""
     try:
@@ -397,13 +471,6 @@ def get_documents_from_urls_robust(
     use_js_render: bool = False,
     js_only_when_needed: bool = True,
 ) -> t.List[Document]:
-    """
-    Robust URL ingestion:
-      - robots.txt check (optional)
-      - PDF → LlamaParse (fallback to pdfminer if needed)
-      - HTML → multi-extractor pipeline
-      - Optional JS rendering via Playwright
-    """
     docs: t.List[Document] = []
     last_domain_ts: dict[str, float] = {}
 
@@ -415,7 +482,6 @@ def get_documents_from_urls_robust(
         if respect_robots and not _robots_allowed(url):
             continue
 
-        # simple per-domain rate limiting
         netloc = urlparse(url).netloc
         now = time.time()
         prev = last_domain_ts.get(netloc, 0.0)
@@ -423,26 +489,19 @@ def get_documents_from_urls_robust(
             time.sleep(per_domain_delay - (now - prev))
         last_domain_ts[netloc] = time.time()
 
-        # fetch
         try:
             resp = _http_fetch(url)
         except Exception:
             resp = None
 
-        # PDF path → LlamaParse
         if resp and _looks_like_pdf(resp, url):
             text = ""
             if resp.content:
-                # try LlamaParse
-                text = _extract_pdf_with_llamaparse_from_bytes(resp.content)
-                # fallback: local pdfminer
-                if not text:
-                    text = _extract_from_pdf_bytes_local(resp.content)
+                text = _extract_pdf_with_llamaparse_from_bytes(resp.content) or _extract_from_pdf_bytes_local(resp.content)
             if text and len(text) >= min_chars:
                 docs.append(Document(page_content=text, metadata={"source": url, "title": url}))
             continue
 
-        # HTML extraction
         html, title, extracted_text = "", "", ""
         if resp is not None:
             enc = _detect_encoding(resp.content)
@@ -451,11 +510,11 @@ def get_documents_from_urls_robust(
             except Exception:
                 html = resp.text
             extracted_text, title = extract_readable_text(html, url)
-
-        # JS rendering if needed
-        need_js = use_js_render and (not extracted_text or len(extracted_text) < min_chars)
-        if need_js and (not js_only_when_needed or (js_only_when_needed and (not extracted_text or len(extracted_text) < min_chars))):
-            rendered_html = render_with_playwright(url)
+        
+        should_render_js = use_js_render and (not js_only_when_needed or len(extracted_text) < min_chars)
+        
+        if should_render_js:
+            rendered_html = render_with_playwright_robust(url)
             if rendered_html:
                 t2, tt2 = extract_readable_text(rendered_html, url)
                 if len(t2) > len(extracted_text):
@@ -471,16 +530,10 @@ def get_documents_from_urls_robust(
 # Public API: Files → Documents
 # -----------------------------
 def get_documents_from_uploaded_files(
-    files: t.List,  # List[UploadedFile]
+    files: t.List,
     *,
     min_chars: int = 100,
 ) -> t.List[Document]:
-    """
-    Convert uploaded files into LangChain Documents.
-      - PDF: LlamaParse, fallback to pdfminer
-      - DOCX: python-docx
-      - TXT/MD/CSV/LOG/JSON: best-effort decode
-    """
     docs: t.List[Document] = []
     if not files:
         return docs
@@ -494,15 +547,9 @@ def get_documents_from_uploaded_files(
 
             if suffix == "pdf":
                 text = _extract_pdf_with_llamaparse_from_bytes(raw) or _extract_from_pdf_bytes_local(raw)
-
             elif suffix in {"docx"}:
                 text = _extract_from_docx_bytes(raw)
-
-            elif suffix in {"txt", "md", "csv", "log", "json"}:
-                text = _normalize_text(_read_bytes_to_text(raw))
-
             else:
-                # unknown binary → try as text
                 text = _normalize_text(_read_bytes_to_text(raw))
 
             if text and len(text) >= min_chars:
@@ -518,7 +565,6 @@ def get_documents_from_uploaded_files(
                     )
                 )
         except Exception:
-            # skip individual failures
             continue
 
     return docs
