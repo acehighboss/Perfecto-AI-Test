@@ -1,3 +1,5 @@
+# main.py
+
 import traceback
 import streamlit as st
 from typing import List, Any, Dict
@@ -35,8 +37,15 @@ if "last_question" not in st.session_state:
 # 사이드바
 with st.sidebar:
     st.subheader("시스템 프롬프트(페르소나)")
+    # ★★★ st.text_area에 누락된 label 인자 추가 ★★★
     system_prompt = st.text_area(
-        # ... (이전과 동일)
+        label="모델의 역할/톤/스타일",
+        value=(
+            "당신은 주어진 컨텍스트만을 사용하여 사용자의 질문에 답변하는 AI 어시S턴트입니다. "
+            "항상 친절하고, 정확한 정보를 한국어로 상세하게 전달해주세요. "
+            "컨텍스트에 없는 내용은 답변할 수 없다고 솔직하게 말해주세요."
+        ),
+        height=150,
     )
     st.markdown("---")
     st.subheader("데이터 불러오기")
@@ -47,7 +56,7 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "md", "csv", "json", "log"],
         accept_multiple_files=True,
     )
-    # ★★★ 크롤링 옵션을 명확하게 변경 ★★★
+    # 크롤링 옵션을 명확하게 변경
     respect_robots = st.toggle("robots.txt 준수 (권장)", value=True)
     use_js_render = st.toggle("JS 렌더링 사용 (느림)", value=True, help="JavaScript로 동적으로 생성되는 콘텐츠를 가져옵니다.")
     js_only_when_needed = st.toggle("정적 추출 실패 시에만 JS 사용", value=True)
@@ -59,7 +68,7 @@ with st.sidebar:
             try:
                 urls = [u.strip() for u in url_input.splitlines() if u.strip()]
                 
-                # ★★★ file_handler에 옵션을 딕셔너리로 전달 ★★★
+                # file_handler에 옵션을 딕셔너리로 전달
                 url_options = {
                     "respect_robots": respect_robots,
                     "use_js_render": use_js_render,
@@ -86,7 +95,7 @@ with st.sidebar:
                 st.caption(traceback.format_exc())
                 st.session_state.ready = False
 
-# 메인 화면
+# --- (이하 메인 화면 및 사용자 입력 처리 로직은 이전과 동일) ---
 col_main, col_sources = st.columns([3, 2])
 
 with col_main:
@@ -105,7 +114,7 @@ with col_main:
                 {
                     "source": d.metadata.get("source", "N/A"),
                     "title": d.metadata.get("title", "Unknown"),
-                    "snippet": d.page_content, # 이제 snippet은 핵심 문장
+                    "snippet": d.page_content,
                 }
                 for d in st.session_state.docs_for_citation
             ],
@@ -114,7 +123,6 @@ with col_main:
 
 with col_sources:
     st.subheader("소스 미리보기")
-    # 답변 후에는 핵심 문장을, 그 전에는 전체 문서 내용을 미리 보여줌
     preview_docs = st.session_state.docs_for_citation or st.session_state.docs
     if preview_docs:
         for i, d in enumerate(preview_docs[:10], 1):
@@ -126,7 +134,6 @@ with col_sources:
     else:
         st.caption("불러온 문서가 없습니다.")
 
-# 사용자 입력 처리
 if user_query := st.chat_input("여기에 질문을 입력하세요"):
     if not st.session_state.ready or not st.session_state.retriever:
         st.warning("먼저 좌측에서 문서를 불러오고 처리가 완료될 때까지 기다려주세요.")
@@ -138,14 +145,12 @@ if user_query := st.chat_input("여기에 질문을 입력하세요"):
             st.write(user_query)
 
         try:
-            # Retriever를 세션에서 가져와 체인 생성
             chain = get_conversational_rag_chain(st.session_state.retriever, system_prompt)
             
             with st.spinner("답변을 생성하는 중입니다..."):
                 result = chain.invoke(user_query)
             
             answer_text = result.get("answer", "답변을 생성하지 못했습니다.")
-            # ★★★ 최종 출처 키를 'final_sources'로 변경 ★★★
             final_source_docs = result.get("final_sources", [])
 
             st.session_state.messages.append(AIMessage(content=answer_text))
@@ -156,4 +161,3 @@ if user_query := st.chat_input("여기에 질문을 입력하세요"):
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
             st.caption(traceback.format_exc())
-
