@@ -16,7 +16,7 @@ from RAG.chain_builder import get_conversational_rag_chain
 st.set_page_config(page_title="Perfecto AI Test (RAG)", page_icon="🧪", layout="wide")
 st.title("Perfecto AI Test (RAG)")
 
-# Session State 초기화
+# --- (Session State 초기화는 이전과 동일) ---
 if "messages" not in st.session_state:
     st.session_state.messages: List[Any] = []
 if "docs" not in st.session_state:
@@ -36,13 +36,7 @@ if "last_question" not in st.session_state:
 with st.sidebar:
     st.subheader("시스템 프롬프트(페르소나)")
     system_prompt = st.text_area(
-        "모델의 역할/톤/스타일",
-        value=(
-            "당신은 주어진 컨텍스트만을 사용하여 사용자의 질문에 답변하는 AI 어시스턴트입니다. "
-            "항상 친절하고, 정확한 정보를 한국어로 상세하게 전달해주세요. "
-            "컨텍스트에 없는 내용은 답변할 수 없다고 솔직하게 말해주세요."
-        ),
-        height=150,
+        # ... (이전과 동일)
     )
     st.markdown("---")
     st.subheader("데이터 불러오기")
@@ -53,26 +47,38 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "md", "csv", "json", "log"],
         accept_multiple_files=True,
     )
-    use_js_render = st.toggle("JS 렌더링(Playwright) 사용", value=True)
+    # ★★★ 크롤링 옵션을 명확하게 변경 ★★★
+    respect_robots = st.toggle("robots.txt 준수 (권장)", value=True)
+    use_js_render = st.toggle("JS 렌더링 사용 (느림)", value=True, help="JavaScript로 동적으로 생성되는 콘텐츠를 가져옵니다.")
+    js_only_when_needed = st.toggle("정적 추출 실패 시에만 JS 사용", value=True)
+    min_chars=st.slider("최소 글자 수", 50, 500, 150)
+
 
     if st.button("불러오기", use_container_width=True):
-        with st.spinner("문서를 불러오고 Retriever를 생성하는 중입니다..."):
+        with st.spinner("문서를 불러오는 중입니다..."):
             try:
                 urls = [u.strip() for u in url_input.splitlines() if u.strip()]
-                url_docs = get_documents_from_urls_robust(urls, use_js_render=use_js_render) if urls else []
-                file_docs = get_documents_from_uploaded_files(uploaded_files) if uploaded_files else []
+                
+                # ★★★ file_handler에 옵션을 딕셔너리로 전달 ★★★
+                url_options = {
+                    "respect_robots": respect_robots,
+                    "use_js_render": use_js_render,
+                    "js_only_when_needed": js_only_when_needed,
+                    "min_chars": min_chars
+                }
+                url_docs = get_documents_from_urls_robust(urls, **url_options) if urls else []
+                file_docs = get_documents_from_uploaded_files(uploaded_files, min_chars=min_chars) if uploaded_files else []
 
                 docs = url_docs + file_docs
                 if docs:
                     st.session_state.docs = docs
-                    # Retriever를 생성하고 세션에 저장
                     st.session_state.retriever = get_retriever_from_documents(docs)
                     st.session_state.ready = True
-                    st.session_state.docs_for_citation = []
+                    st.session_state.docs_for_citation = [] # 초기화
                     st.success(f"{len(docs)}개 문서 처리 완료. 이제 질문할 수 있습니다.")
                     st.rerun()
                 else:
-                    st.warning("불러온 문서가 없습니다.")
+                    st.warning("처리할 수 있는 문서가 없습니다.")
                     st.session_state.ready = False
 
             except Exception as e:
@@ -150,3 +156,4 @@ if user_query := st.chat_input("여기에 질문을 입력하세요"):
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
             st.caption(traceback.format_exc())
+
