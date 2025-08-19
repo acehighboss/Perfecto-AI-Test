@@ -1,5 +1,3 @@
-# RAG/chain_builder.py
-
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
@@ -12,7 +10,7 @@ from langchain.text_splitter import SpacyTextSplitter
 
 
 def format_docs_for_llm(docs: list[Document]) -> str:
-    """LLM 프롬프트용으로 문서 내용을 포맷합니다."""
+    """LLM 프롬프프트용으로 문서 내용을 포맷합니다."""
     if not docs:
         return "No context provided."
     return "\n\n---\n\n".join([doc.page_content for doc in docs])
@@ -38,12 +36,18 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         "사용자 질문: {question}\n\n"
         "검색어 (JSON):"
     )
-    question_to_queries_chain = query_generation_prompt | llm | JsonOutputParser()
+    question_to_queries_chain = (
+        query_generation_prompt 
+        | llm 
+        | JsonOutputParser()
+        # JSON에서 쿼리 리스트만 추출하여 반환
+        | RunnableLambda(lambda x: x.get("queries", []))
+    )
 
     # 2. Retriever를 병렬로 실행하고 결과를 융합하는 함수
-    def retrieve_and_fuse_results(queries_dict: Dict) -> List[Document]:
-        queries = queries_dict.get("queries", [])
-        if not queries: return []
+    def retrieve_and_fuse_results(queries: List[str]) -> List[Document]:
+        if not queries: 
+            return []
         
         retrieved_docs_lists = retriever.batch(queries)
         
