@@ -1,5 +1,3 @@
-# main.py
-
 import traceback
 import streamlit as st
 from typing import List, Any, Dict
@@ -37,11 +35,10 @@ if "last_question" not in st.session_state:
 # 사이드바
 with st.sidebar:
     st.subheader("시스템 프롬프트(페르소나)")
-    # ★★★ st.text_area에 누락된 label 인자 추가 ★★★
     system_prompt = st.text_area(
         label="모델의 역할/톤/스타일",
         value=(
-            "당신은 주어진 컨텍스트만을 사용하여 사용자의 질문에 답변하는 AI 어시S턴트입니다. "
+            "당신은 주어진 컨텍스트만을 사용하여 사용자의 질문에 답변하는 AI 어시스턴트입니다. "
             "항상 친절하고, 정확한 정보를 한국어로 상세하게 전달해주세요. "
             "컨텍스트에 없는 내용은 답변할 수 없다고 솔직하게 말해주세요."
         ),
@@ -94,6 +91,17 @@ with st.sidebar:
                 st.error(f"처리 중 오류 발생: {e}")
                 st.caption(traceback.format_exc())
                 st.session_state.ready = False
+                
+    # ★★★ 사이드바 맨 아래에 대화 초기화 버튼 추가 ★★★
+    st.markdown("---")
+    if st.button("대화 초기화", use_container_width=True, type="secondary"):
+        st.session_state.messages = []
+        st.session_state.docs_for_citation = []
+        st.session_state.last_answer = ""
+        st.session_state.last_question = ""
+        st.success("대화 내용이 초기화되었습니다.")
+        st.rerun()
+
 
 # --- (이하 메인 화면 및 사용자 입력 처리 로직은 이전과 동일) ---
 col_main, col_sources = st.columns([3, 2])
