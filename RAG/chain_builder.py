@@ -1,3 +1,5 @@
+# RAG/chain_builder.py
+
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
@@ -6,7 +8,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_cohere import CohereRerank
 from typing import List, Dict
 
-# ★★★ 근거 문장 추출 후 문장 단위로 분리하기 위한 도구 추가 ★★★
 from langchain.text_splitter import SpacyTextSplitter
 
 
@@ -24,17 +25,15 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
     reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=10)
     
-    # spaCy 모델 로드 (문장 분리용)
     try:
         sentence_splitter = SpacyTextSplitter(pipeline="ko_core_news_sm")
     except Exception:
-        # 모델 로드 실패 시 기본 분리기로 대체
         sentence_splitter = SpacyTextSplitter()
 
 
     # 1. 다중 쿼리 생성 체인
     query_generation_prompt = ChatPromptTemplate.from_template(
-        '사용자의 질문을 분석하여, 검색에 효과적인 3개의 다양한 검색어를 JSON 객체 {"queries": [...]} 형태로 생성해주세요. '
+        '사용자의 질문을 분석하여, 검색에 효과적인 3개의 다양한 검색어를 JSON 객체 {{"queries": [...]}} 형태로 생성해주세요. '
         "질문의 핵심 키워드를 포함하되, 다른 표현이나 관점을 추가하세요.\n\n"
         "사용자 질문: {question}\n\n"
         "검색어 (JSON):"
@@ -61,7 +60,7 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         f"{system_prompt}\n\n**Context:**\n{{context}}\n\n**User's Question:**\n{{question}}\n\n**Answer (in Korean):**"
     )
 
-    # 4. ★★★ 핵심 근거 문장 추출 체인 ★★★
+    # 4. 핵심 근거 문장 추출 체인
     sentence_extraction_prompt = ChatPromptTemplate.from_template(
         "You are an expert at identifying supporting evidence.\n"
         'From the provided "Context", extract the exact, complete, and verbatim sentences that directly support the "Answer" to the "User\'s Question".\n'
@@ -75,8 +74,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
     sentence_extractor_chain = sentence_extraction_prompt | llm | StrOutputParser()
 
     # 5. 전체 파이프라인 구성
-    
-    # 5-1. 질문 확장 및 병렬 검색
     retrieval_chain = (
         RunnableParallel({
             "generated_queries": question_to_queries_chain,
@@ -88,7 +85,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         })
     )
 
-    # 5-2. 재정렬 및 답변 생성
     rag_chain_with_sources = (
         retrieval_chain
         | RunnableParallel({
@@ -110,7 +106,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         }
     )
 
-    # 5-3. ★★★ 답변을 기반으로 최종 근거 문장 추출 및 포맷팅 ★★★
     def extract_and_format_final_sources(rag_output: Dict) -> Dict:
         answer = rag_output["answer"]
         source_chunks = rag_output["source_documents"]
@@ -118,7 +113,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         if not source_chunks:
             return {"answer": answer, "final_sources": []}
 
-        # 근거 문장 추출 실행
         context_str = format_docs_for_llm(source_chunks)
         extracted_sentences_str = sentence_extractor_chain.invoke({
             "context": context_str,
@@ -126,23 +120,18 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
             "answer": answer
         })
 
-        # 추출된 문장이 없으면, 기존 청크를 그대로 반환 (Fallback)
         if not extracted_sentences_str.strip():
             return {"answer": answer, "final_sources": source_chunks}
 
-        # 추출된 문자열을 개별 문장으로 분리
         extracted_sentences = sentence_splitter.split_text(extracted_sentences_str)
         
-        # 각 문장을 Document 객체로 변환하고 원본 메타데이터 유지
         final_sources = []
         for sentence in extracted_sentences:
-            # 원본 청크에서 문장을 찾아 메타데이터를 가져옴
             original_metadata = {}
             for chunk in source_chunks:
                 if sentence.strip() in chunk.page_content:
                     original_metadata = chunk.metadata
                     break
-            # 문장을 찾지 못한 경우, 첫 번째 청크의 메타데이터를 기본값으로 사용
             if not original_metadata and source_chunks:
                 original_metadata = source_chunks[0].metadata
 
@@ -150,8 +139,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
             
         return {"answer": answer, "final_sources": final_sources}
 
-    # 최종 체인: 답변 생성 -> 근거 문장 추출
     final_chain = rag_chain_with_sources | RunnableLambda(extract_and_format_final_sources)
     
-    # chain.invoke에 question 딕셔너리가 아닌 문자열을 바로 전달할 수 있도록 래핑
     return RunnableLambda(lambda question_str: final_chain.invoke({"question": question_str}))
