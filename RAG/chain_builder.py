@@ -2,7 +2,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableParallel
-from langchain_google_genai import ChatGoogleGeneraiAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_cohere import CohereRerank
 from typing import List, Dict
 
@@ -21,7 +21,7 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
     """
     '다중 쿼리 생성'과 '결과 융합', 그리고 '핵심 문장 추출'을 사용하는 RAG 체인을 구성합니다.
     """
-    llm = ChatGoogleGeneraiAI(model="gemini-1.5-flash", temperature=0)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
     reranker = CohereRerank(model="rerank-multilingual-v3.0", top_n=10)
     
     # spaCy 모델 로드 (문장 분리용)
