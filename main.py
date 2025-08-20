@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 
 # ==== 프로젝트 내부 모듈 (레포 구조 유지) ====
 # 주의: 파일명 변경 금지
-from RAG.rag_pipeline import get_retriever_from_source
+from RAG.rag_pipeline import get_retriever
 from RAG.chain_builder import get_conversational_rag_chain, get_default_chain  # 내부에서 문장 단위 축약 적용됨
 from file_handler import get_documents_from_files
 from text_scraper import clean_html_parallel  # 레포에 이미 존재하는 함수 사용
@@ -108,28 +108,28 @@ def _safe_build_retriever(all_docs: List[Document]):
 
     # 1) documents 키워드 인자를 받는 구현
     try:
-        retriever = get_retriever_from_source(source="uploaded", documents=all_docs)
+        retriever = get_retriever(source="uploaded", documents=all_docs)
         return retriever
     except Exception as e:
         last_err = e
 
     # 2) docs 키워드 인자를 받는 구현
     try:
-        retriever = get_retriever_from_source(source="uploaded", docs=all_docs)
+        retriever = get_retriever(source="uploaded", docs=all_docs)
         return retriever
     except Exception as e:
         last_err = e
 
     # 3) 단일 인자만 받는 구현 (documents)
     try:
-        retriever = get_retriever_from_source(all_docs)
+        retriever = get_retriever(all_docs)
         return retriever
     except Exception as e:
         last_err = e
 
     # 4) source만 받고 내부에서 이미 인덱스가 만들어지는 구현
     try:
-        retriever = get_retriever_from_source(source="uploaded")
+        retriever = get_retriever(source="uploaded")
         return retriever
     except Exception as e:
         last_err = e
@@ -403,3 +403,4 @@ st.markdown(
     "<code>retrieve_and_fuse_results</code> 는 질문과 가장 관련된 문장만 선별하여 표시합니다.</div>",
     unsafe_allow_html=True,
 )
+
