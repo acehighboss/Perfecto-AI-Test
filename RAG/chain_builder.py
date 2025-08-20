@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import os
 import re
 import math
@@ -93,7 +93,7 @@ def _sentence_rows_from_doc(doc: Document) -> List[Dict[str, Any]]:
 # -----------------------------------------------------------------------------
 def _embed_texts(texts: List[str]) -> np.ndarray:
     if OpenAIEmbeddings is None:
-        # 폴백: 텍스트 길이를 surrogate feature로 사용 (간이 스코어에 활용)
+        # 폴백: 텍스트 고유 토큰 수를 surrogate feature로 사용
         return np.array([[len(set(t.lower().split()))] for t in texts], dtype=float)
     emb = OpenAIEmbeddings(model="text-embedding-3-small")
     vecs = emb.embed_documents(texts)
@@ -116,19 +116,43 @@ def extract_relevant_sentences(
     top_k: int = 8,
     max_per_source: int = 3,
     min_chars: int = 12,
+    # --- 호환성 별칭 (main.py 등에서 다른 이름으로 넘길 수 있음) ---
+    max_sentences: Optional[int] = None,
+    per_source_limit: Optional[int] = None,
+    limit: Optional[int] = None,
+    limit_per_source: Optional[int] = None,
+    **kwargs,  # 추가로 넘어오는 예기치 못한 인자 무시 (안전장치)
 ) -> List[Dict[str, Any]]:
     """
     검색된 Document들에서 질문과 가장 관련 높은 문장만 추출.
     반환: [{text, score, source, where, metadata}]
+
+    매개변수 호환:
+    - max_sentences 또는 limit -> top_k
+    - per_source_limit 또는 limit_per_source -> max_per_source
     """
+    # --- 별칭 매핑 ---
+    if max_sentences is not None:
+        top_k = int(max_sentences)
+    elif limit is not None:
+        top_k = int(limit)
+
+    if per_source_limit is not None:
+        max_per_source = int(per_source_limit)
+    elif limit_per_source is not None:
+        max_per_source = int(limit_per_source)
+
+    # 1) 문장 후보 생성
     rows: List[Dict[str, Any]] = []
     for d in retrieved_docs or []:
         rows.extend(_sentence_rows_from_doc(d))
 
+    # 최소 길이 필터
     rows = [r for r in rows if len(r["text"]) >= min_chars]
     if not rows:
         return []
 
+    # 2) 유사도 스코어링
     all_texts = [r["text"] for r in rows]
     if OpenAIEmbeddings is None:
         # 폴백: 질문 토큰과의 중복수 기반 간이 점수
@@ -148,6 +172,7 @@ def extract_relevant_sentences(
     for r, s in zip(rows, scores):
         r["score"] = float(s)
 
+    # 3) 소스별 상한을 두고 top_k 선별
     rows.sort(key=lambda x: x["score"], reverse=True)
     per_src: Dict[str, int] = {}
     picked: List[Dict[str, Any]] = []
@@ -208,7 +233,6 @@ def build_answer_from_sentences(
 
     # LLM 불가: 간단 요약 + 근거 라벨
     uniq_tags: List[str] = []
-    tag_map: List[str] = []
     for s in sentences:
         tag = (s.get("source") or "").strip()
         where = (s.get("where") or "").strip()
@@ -216,7 +240,6 @@ def build_answer_from_sentences(
             tag = f"{tag} {where}".strip()
         if tag and tag not in uniq_tags:
             uniq_tags.append(tag)
-        tag_map.append(tag)
 
     bullets = "\n".join([f"- {s['text']}" for s in sentences[:8]])
     cite = ", ".join([f"[{i+1}]" for i in range(min(len(sentences), 8))])
