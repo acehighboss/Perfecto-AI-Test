@@ -1,326 +1,228 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-import os
+
+from typing import List, Dict, Any, Optional, Tuple
 import re
 import math
+from collections import Counter, defaultdict
 
-import numpy as np
-
-# ---- LangChain 타입 호환 ------------------------------------------------------
-try:
-    from langchain_core.documents import Document
-except Exception:
-    try:
-        from langchain.schema import Document  # type: ignore
-    except Exception:
-        class Document:  # type: ignore
-            def __init__(self, page_content: str, metadata: Optional[Dict[str, Any]] = None):
-                self.page_content = page_content
-                self.metadata = metadata or {}
-
-# 선택적 LLM/임베딩
-try:
-    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-except Exception:
-    OpenAIEmbeddings = None  # type: ignore
-    ChatOpenAI = None  # type: ignore
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+from langchain_core.language_models.chat_models import BaseChatModel
 
 
-# -----------------------------------------------------------------------------
-# 문장 분할 & 포맷 유틸
-# -----------------------------------------------------------------------------
-def _sent_tokenize(text: str) -> List[str]:
-    """언어-무관한 안전 분할: 개행과 문장부호 기준으로 단순 분할."""
-    text = re.sub(r"[ \t]+", " ", text).strip()
-    if not text:
-        return []
-    # 큰 단위 개행 먼저
-    blocks = re.split(r"\n{2,}|\r{2,}", text)
-    out: List[str] = []
-    for blk in blocks:
-        parts = re.split(r"(?<=[\.!?]|[。！？])\s+", blk)
-        for p in parts:
-            s = p.strip()
-            if s:
-                out.append(s)
-    return out
+# ===== 프롬프트: 근거 기반 답변 =====
+ANSWER_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "당신은 한국어 조교입니다. 반드시 제공된 '근거 문장' 안에서만 답하세요. "
+     "근거에 없는 정보는 추정하지 마세요. 답변은 간결하게 하되, 질문이 '이름/특징'을 물으면 "
+     "1) 한 문단 요약 답변, 2) '핵심 특징' 불릿 2~4개를 제시합니다. "
+     "문장 끝에 [S#] 표기를 사용해 인용 근거를 명확히 하세요."),
+    ("human",
+     "질문: {question}\n\n근거 문장:\n{evidence}\n\n"
+     "지침:\n- 5문장 이내 요약\n- 불필요한 수사는 금지\n- [S#]는 실제 근거 문장 번호만 사용")
+])
+
+# ===== LLM 이름/키워드 휴리스틱 =====
+LLM_NAME_PATTERNS = [
+    r"\bA\.?X\b", r"에이닷\s*엑스", r"\bAX\s*\d(?:\.\d)?\b",
+    r"Telco\s*-?\s*LLM", r"텔코\s*LLM"
+]
 
 
-def _fmt_ts(seconds: Any) -> str:
-    try:
-        sec = int(float(seconds))
-    except Exception:
-        return ""
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
+def _make_evidence_block(sentences: List[Dict[str, Any]]) -> str:
+    """문장 리스트를 [S#] 형식과 출처/페이지/타임코드로 포매팅."""
+    lines = []
+    for i, s in enumerate(sentences, 1):
+        src = s.get("source", "")
+        extra = []
+        if s.get("page"):
+            extra.append(f"p.{s['page']}")
+        if s.get("timecode"):
+            extra.append(str(s["timecode"]))
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        lines.append(f"[S{i}] {s['text']} (출처: {src}{suffix})")
+    return "\n".join(lines)
 
 
-def _sentence_rows_from_doc(doc: Document) -> List[Dict[str, Any]]:
-    """
-    Document → 문장 단위 row 변환
-    반환 row: {text, source, where, citation, metadata}
-    where: PDF면 'p.N', 자막이면 't=MM:SS'
-    citation: main.py가 바로 출력 가능한 문자열(예: 'https://... p.3' 또는 'https://... t=01:23')
-    """
-    rows: List[Dict[str, Any]] = []
-    meta = getattr(doc, "metadata", {}) or {}
-    src = meta.get("source") or meta.get("url") or meta.get("path") or ""
-    title = meta.get("title") or ""
+def _contains_answer_terms(sentences: List[Dict[str, Any]], patterns: List[str]) -> bool:
+    """근거 문장 덩어리 속에 핵심 정답 키워드가 있는지 휴리스틱 확인."""
+    blob = " ".join(s.get("text", "") for s in sentences)
+    for pat in patterns:
+        if re.search(pat, blob, flags=re.IGNORECASE):
+            return True
+    return False
 
-    page = meta.get("page") or meta.get("page_number")
-    ts = meta.get("start") or meta.get("timestamp") or meta.get("start_time")
 
-    for sent in _sent_tokenize(getattr(doc, "page_content", "") or ""):
-        if not sent.strip():
-            continue
-        where = None
-        if page is not None:
-            where = f"p.{page}"
-        elif ts is not None:
-            where = f"t={_fmt_ts(ts)}"
-
-        # citation은 main.py에서 바로 쓰도록 source(+선택 where)로 구성
-        # 제목이 있더라도 UI 단에서 혼선을 줄이기 위해 기본은 URL/경로 기준으로 표기
-        citation = (src or "").strip()
-        if where:
-            citation = f"{citation} {where}".strip()
-
-        rows.append(
-            {
-                "text": sent.strip(),
-                "source": src,
-                "where": where,        # 'p.3' 또는 't=01:23'
-                "citation": citation,  # ✅ main.py 호환 필드
-                "metadata": meta,
-            }
+def _safe_llm_invoke(llm: Optional[BaseChatModel], prompt: ChatPromptTemplate, inputs: Dict[str, Any]) -> str:
+    """LLM이 None이거나 실패 시 안전한 폴백."""
+    if llm is None:
+        return (
+            "⚠️ LLM이 초기화되지 않아 생성 요약을 수행할 수 없습니다. "
+            "환경설정(예: API 키, 모델명)을 확인해 주세요."
         )
-    return rows
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke(inputs)
 
 
-# -----------------------------------------------------------------------------
-# 스코어링(임베딩 또는 간이 토큰 중복)
-# -----------------------------------------------------------------------------
-def _embed_texts(texts: List[str]) -> np.ndarray:
-    if OpenAIEmbeddings is None:
-        # 폴백: 텍스트 고유 토큰 수를 surrogate feature로 사용
-        return np.array([[len(set(t.lower().split()))] for t in texts], dtype=float)
-    emb = OpenAIEmbeddings(model="text-embedding-3-small")
-    vecs = emb.embed_documents(texts)
-    return np.array(vecs, dtype=float)
-
-
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-    denom = (np.linalg.norm(a) * np.linalg.norm(b))
-    if denom == 0:
-        return 0.0
-    return float(np.dot(a, b) / denom)
-
-
-# -----------------------------------------------------------------------------
-# 공개 함수 1) 질문에 필요한 "최소 문장"만 추출
-# -----------------------------------------------------------------------------
-def extract_relevant_sentences(
-    question: str,
-    retrieved_docs: List[Document],
-    top_k: int = 8,
-    max_per_source: int = 3,
-    min_chars: int = 12,
-    # --- 호환성 별칭 (main.py 등에서 다른 이름으로 넘길 수 있음) ---
-    max_sentences: Optional[int] = None,
-    per_source_limit: Optional[int] = None,
-    limit: Optional[int] = None,
-    limit_per_source: Optional[int] = None,
-    **kwargs,  # 예기치 못한 인자 무시 (안전장치)
-) -> List[Dict[str, Any]]:
-    """
-    검색된 Document들에서 질문과 가장 관련 높은 문장만 추출.
-    반환: [{text, score, source, where, citation, metadata}]
-
-    매개변수 호환:
-    - max_sentences 또는 limit -> top_k
-    - per_source_limit 또는 limit_per_source -> max_per_source
-    """
-    # --- 별칭 매핑 ---
-    if max_sentences is not None:
-        top_k = int(max_sentences)
-    elif limit is not None:
-        top_k = int(limit)
-
-    if per_source_limit is not None:
-        max_per_source = int(per_source_limit)
-    elif limit_per_source is not None:
-        max_per_source = int(limit_per_source)
-
-    # 1) 문장 후보 생성
-    rows: List[Dict[str, Any]] = []
-    for d in retrieved_docs or []:
-        rows.extend(_sentence_rows_from_doc(d))
-
-    # 최소 길이 필터
-    rows = [r for r in rows if len(r["text"]) >= min_chars]
-    if not rows:
-        return []
-
-    # 2) 유사도 스코어링
-    all_texts = [r["text"] for r in rows]
-    if OpenAIEmbeddings is None:
-        # 폴백: 질문 토큰과의 중복수 기반 간이 점수
-        q_tokens = set(question.lower().split())
-
-        def cheap_score(t: str) -> float:
-            s_tokens = set(t.lower().split())
-            inter = len(q_tokens & s_tokens)
-            return inter / math.sqrt(len(s_tokens) + 1e-6)
-
-        scores = np.array([cheap_score(t) for t in all_texts], dtype=float)
-    else:
-        q_vec = _embed_texts([question])[0]
-        row_vecs = _embed_texts(all_texts)
-        scores = np.array([_cosine(q_vec, v) for v in row_vecs], dtype=float)
-
-    for r, s in zip(rows, scores):
-        r["score"] = float(s)
-
-    # 3) 소스별 상한을 두고 top_k 선별
-    rows.sort(key=lambda x: x["score"], reverse=True)
-    per_src: Dict[str, int] = {}
-    picked: List[Dict[str, Any]] = []
-    for r in rows:
-        src = r["source"] or "unknown"
-        if per_src.get(src, 0) >= max_per_source:
-            continue
-        picked.append(r)
-        per_src[src] = per_src.get(src, 0) + 1
-        if len(picked) >= top_k:
-            break
-
-    return picked
-
-
-# -----------------------------------------------------------------------------
-# 공개 함수 2) 추려진 문장만으로 답변 구성
-# -----------------------------------------------------------------------------
 def build_answer_from_sentences(
+    llm: Optional[BaseChatModel],
     question: str,
     sentences: List[Dict[str, Any]],
-    model_name: Optional[str] = None,
-    language: str = "ko",
-) -> str:
+    *,
+    allow_generation: bool = True,
+    require_terms: Optional[List[str]] = None
+) -> Dict[str, Any]:
     """
-    추려진 문장만 근거로 **과추론 없이** 답변 작성.
-    LLM 가능 시 ChatOpenAI 사용, 아니면 간단 요약으로 대체.
+    근거 문장들로부터 최종 답변/요약을 생성.
+    sentences: [{"text": str, "source": str, "page": int|None, "timecode": str|None}, ...]
+    return: {"answer": str, "sentences": [...], "answerable": bool}
     """
+    if not allow_generation:
+        # 이전보다 사용자 친화적인 문구
+        return {
+            "answer": "⚠️ 현재 '생성 요약'이 꺼져 있어 근거 문장만 제공합니다. 사이드바에서 켜면 문장형 답변을 생성합니다.",
+            "sentences": sentences,
+            "answerable": False,
+        }
+
     if not sentences:
-        return "해당 질문에 답할 수 있는 근거 문장을 찾지 못했습니다. 다른 표현으로 다시 질문해 주세요."
+        return {
+            "answer": "업로드한 출처에서 관련 근거를 찾지 못했습니다. 더 적합한 문서를 업로드해 주세요.",
+            "sentences": [],
+            "answerable": False,
+        }
 
-    if ChatOpenAI is not None:
-        name = model_name or os.getenv("OPENAI_MODEL_NAME") or "gpt-4o-mini"
-        llm = ChatOpenAI(model=name, temperature=0)
-        lines = []
-        for i, s in enumerate(sentences, 1):
-            where = f" {s['where']}" if s.get("where") else ""
-            lines.append(f"[{i}] {s['text']}{where}")
-        evidence_block = "\n".join(lines)
+    # '핵심 키워드 포함 여부' 휴리스틱
+    required = require_terms if require_terms is not None else LLM_NAME_PATTERNS
+    has_core_terms = _contains_answer_terms(sentences, required)
+    evidence = _make_evidence_block(sentences)
 
-        system = (
-            "당신은 엄격한 RAG 어시스턴트입니다. 사용자 질문에 대해 아래 '증거 문장'만을 근거로, "
-            "추가 지식 없이 한국어로 간결하고 정확하게 답하세요. "
-            "모호하면 '문맥 불충분'이라고 답하세요. "
-            "숫자/사실은 증거 문장에 나온 값만 사용하세요."
-        )
-        user_prompt = (
-            f"질문: {question}\n\n"
-            f"증거 문장들:\n{evidence_block}\n\n"
-            "규칙:\n"
-            "- 위 문장 안에서만 답을 구성합니다.\n"
-            "- 필요시 문장 번호를 대괄호로 인용하세요 (예: [1], [3]).\n"
-            "- 마지막 줄에 '근거: [1], [2]'처럼 인용 번호만 표기하세요."
-        )
-        resp = llm.invoke([{"role": "system", "content": system},
-                           {"role": "user", "content": user_prompt}])
-        return getattr(resp, "content", str(resp))
+    if not has_core_terms:
+        return {
+            "answer": (
+                "업로드한 출처에 **질문의 핵심(LLM의 정확한 이름/특징)** 을 직접적으로 확인할 문장이 없습니다. "
+                "아래 근거만으로는 확정 답을 내기 어렵습니다. 필요한 경우 "
+                "관련 보도자료/공식 문서를 추가 업로드해 주세요.\n\n"
+                "— 근거 요약은 아래를 참고하세요."
+            ),
+            "sentences": sentences,
+            "answerable": False,
+        }
 
-    # LLM 불가: 간단 요약 + 근거 라벨
-    uniq_tags: List[str] = []
-    for s in sentences:
-        tag = (s.get("source") or "").strip()
-        where = (s.get("where") or "").strip()
-        if where:
-            tag = f"{tag} {where}".strip()
-        if tag and tag not in uniq_tags:
-            uniq_tags.append(tag)
-
-    bullets = "\n".join([f"- {s['text']}" for s in sentences[:8]])
-    cite = ", ".join([f"[{i+1}]" for i in range(min(len(sentences), 8))])
-    srcs = ", ".join([f"[{i+1}] {t}" for i, t in enumerate(uniq_tags[:6])])
-    tail = f"\n\n근거: {cite}"
-    if srcs:
-        tail += f"\n출처: {srcs}"
-    return f"{bullets}{tail}"
+    answer = _safe_llm_invoke(
+        llm,
+        ANSWER_PROMPT,
+        {"question": question, "evidence": evidence}
+    )
+    return {"answer": answer, "sentences": sentences, "answerable": True}
 
 
-# -----------------------------------------------------------------------------
-# 기존 API 유지: 체인 빌더 (간단 래퍼)
-# -----------------------------------------------------------------------------
-class _SimpleRAGChain:
-    """UI 코드 호환용: .invoke({'input': 질문}) 형태 지원."""
-    def __init__(self, retriever, model_name: Optional[str] = None, language: str = "ko"):
-        self.retriever = retriever
-        self.model_name = model_name
-        self.language = language
+# =========================
+# Sentence Ranking Utility
+# =========================
 
-    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        question = inputs.get("question") or inputs.get("input") or inputs.get("query") or ""
-        if not question:
-            return {"answer": "질문이 비어있습니다.", "evidence": []}
-        docs = self.retriever.get_relevant_documents(question)
-        ev = extract_relevant_sentences(question, docs)
-        answer = build_answer_from_sentences(question, ev, model_name=self.model_name, language=self.language)
-        return {"answer": answer, "evidence": ev}
+_SENT_SPLIT = re.compile(r"(?<=[\.\?\!…]|[。？！]|[\n])\s+")
+
+def _tokenize(text: str) -> List[str]:
+    text = re.sub(r"\s+", " ", text.strip().lower())
+    # 숫자/영문/한글 토큰 유지, 기타 구두점 제거
+    text = re.sub(r"[^\w\u3131-\u318E\uAC00-\uD7A3]+", " ", text)
+    return [t for t in text.split() if t]
 
 
-def get_default_chain(retriever, model_name: Optional[str] = None, language: str = "ko"):
+def _calc_idf(all_sentences: List[List[str]]) -> Dict[str, float]:
+    df = defaultdict(int)
+    N = len(all_sentences) or 1
+    for s in all_sentences:
+        for w in set(s):
+            df[w] += 1
+    return {w: math.log((N + 1) / (df[w] + 0.5)) for w in df}
+
+
+def _score_sentence(query_tokens: List[str], sent_tokens: List[str], idf: Dict[str, float]) -> float:
+    if not sent_tokens:
+        return 0.0
+    tf = Counter(sent_tokens)
+    score = 0.0
+    for q in set(query_tokens):
+        score += (tf.get(q, 0) * idf.get(q, 0.0))
+    # 길이 패널티(너무 긴 문장은 감점 소폭)
+    score /= (1.0 + math.log(1 + max(0, len(sent_tokens) - 25)) if len(sent_tokens) > 25 else 1.0)
+    return score
+
+
+def extract_relevant_sentences(
+    docs: List[Document],
+    question: str,
+    k: int = 8,
+    dedupe: bool = True
+) -> List[Dict[str, Any]]:
     """
-    기본 RAG 체인 반환.
-    - 반환 객체는 .invoke({'input': '질문'})로 호출 가능
-    - 결과 dict: {'answer': str, 'evidence': List[...]}
+    업로드된 Document들에서 질문과 가장 관련 있는 '최소' 문장들을 추출.
+    반환 포맷: [{"text": str, "source": str, "page": int|None, "timecode": str|None}, ...]
     """
-    return _SimpleRAGChain(retriever, model_name=model_name, language=language)
+    question_tokens = _tokenize(question)
+
+    candidate: List[Tuple[float, Dict[str, Any]]] = []
+    tokenized_sents: List[List[str]] = []
+
+    # 후보 문장 수집
+    for doc in docs:
+        src = doc.metadata.get("source") or doc.metadata.get("url") or ""
+        page = doc.metadata.get("page")
+        timecode = doc.metadata.get("timecode")
+
+        # 문장 분할
+        for raw_sent in _SENT_SPLIT.split(doc.page_content or ""):
+            sent = raw_sent.strip()
+            if not sent:
+                continue
+            tokens = _tokenize(sent)
+            tokenized_sents.append(tokens)
+            candidate.append((0.0, {"text": sent, "source": src, "page": page, "timecode": timecode, "_tokens": tokens}))
+
+    # 점수화
+    idf = _calc_idf([c[1]["_tokens"] for c in candidate]) if candidate else {}
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for _, item in candidate:
+        score = _score_sentence(question_tokens, item["_tokens"], idf)
+        if score <= 0:
+            continue
+        cleaned = dict(item)
+        cleaned.pop("_tokens", None)
+        scored.append((score, cleaned))
+
+    # 정렬 및 상위 k
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [it for _, it in scored[: max(k * 2, k)]]  # 여유 확보 후 dedupe
+
+    # dedupe: 동일/유사 문장 제거(간단 문자열 키)
+    if dedupe:
+        seen = set()
+        deduped = []
+        for it in top:
+            key = re.sub(r"\s+", " ", it["text"]).strip()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(it)
+        top = deduped
+
+    return top[:k]
 
 
-def get_conversational_rag_chain(
-    retriever,
-    chat_history: Optional[List[Dict[str, str]]] = None,
-    model_name: Optional[str] = None,
-    language: str = "ko",
-):
-    """
-    대화형 RAG 체인.
-    - chat_history는 [{'role':'user'|'assistant','content':'...'}] 형태(선택)
-    - 질문은 .invoke({'input': '질문', 'history': chat_history})로 호출 가능
-    """
-    class _ConvChain(_SimpleRAGChain):
-        def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-            q = inputs.get("question") or inputs.get("input") or ""
-            hist = inputs.get("history") or chat_history or []
-            # 간단한 재질문 보정(LLM 가능 시 살짝 리라이트)
-            if ChatOpenAI is not None and q and hist:
-                llm = ChatOpenAI(model=model_name or os.getenv("OPENAI_MODEL_NAME") or "gpt-4o-mini", temperature=0)
-                prompt = (
-                    "아래 대화 맥락을 고려하여 사용자의 마지막 질문을 검색 친화적으로 간결히 재작성하세요.\n\n"
-                    f"대화:\n{hist}\n\n"
-                    f"마지막 질문: {q}\n"
-                    "재작성:"
-                )
-                try:
-                    q = getattr(llm.invoke(prompt), "content", q) or q
-                except Exception:
-                    pass
+# =========================
+# (옵션) 기본 체인 Stubs
+# =========================
+def get_conversational_rag_chain(llm: BaseChatModel):
+    """레포 호환용 더미. 프로젝트에서 별도 사용 시 기존 구현을 유지하세요."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "간결하게 답하세요."),
+        ("human", "{input}")
+    ])
+    return prompt | llm | StrOutputParser()
 
-            docs = self.retriever.get_relevant_documents(q or inputs.get("question") or "")
-            ev = extract_relevant_sentences(q, docs)
-            answer = build_answer_from_sentences(q, ev, model_name=self.model_name, language=self.language)
-            return {"answer": answer, "evidence": ev}
 
-    return _ConvChain(retriever, model_name=model_name, language=language)
+def get_default_chain(llm: BaseChatModel):
+    """레포 호환용 더미."""
+    return get_conversational_rag_chain(llm)
