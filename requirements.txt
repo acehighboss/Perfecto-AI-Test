@@ -30,3 +30,6 @@ readability-lxml
 boilerpy3
 newspaper3k
 pdfminer.six
+
+langchain-text-splitters
+numpy
