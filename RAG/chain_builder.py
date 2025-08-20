@@ -1,152 +1,151 @@
 import re
-import math
-from typing import List, Tuple, Dict, Any
-from collections import Counter
+from typing import List, Dict, Tuple
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
-# ---------- 문장 분할 ----------
-def _split_sentences(text: str) -> List[str]:
-    """kss가 있으면 사용, 없으면 정규식 사용."""
-    text = text or ""
+_KR_STOP = set(["그리고","그러나","하지만","또한","이는","이것은","그것은","수","등","것","때문","정도","에서","으로","에게","하다","했다","하는","하면"])
+
+def _sent_tokenize_kr(text: str) -> List[str]:
+    """
+    줄바꿈 우선, 문장부호 보조. (외부 의존성 없이 안전)
+    """
+    parts = []
+    for blk in re.split(r"\n+", text.strip()):
+        blk = blk.strip()
+        if not blk:
+            continue
+        # 문장부호 기준 보조 분리
+        segs = re.split(r"(?<=[\.!\?…])\s+|(?<=다)\s+|(?<=요)\s+", blk)
+        for s in segs:
+            s = s.strip()
+            if s:
+                parts.append(s)
+    return parts
+
+def _tokenize(s: str) -> List[str]:
+    s = re.sub(r"[^0-9A-Za-z가-힣\s]", " ", s)
+    toks = [t for t in s.lower().split() if t not in _KR_STOP and len(t) > 1]
+    return toks
+
+def _overlap_score(q_tokens: List[str], s_tokens: List[str]) -> float:
+    if not s_tokens:
+        return 0.0
+    qs = set(q_tokens)
+    ss = set(s_tokens)
+    inter = len(qs & ss)
+    # 길이가 너무 긴 문장 페널티(가벼운 정규화)
+    return inter / (len(ss) ** 0.5 + 1e-6)
+
+def _format_timecode(sec: float) -> str:
     try:
-        import kss  # optional
-        return [s.strip() for s in kss.split_sentences(text) if s.strip()]
+        sec = int(round(float(sec)))
     except Exception:
-        # 마침표/물음표/느낌표 및 줄바꿈 기준
-        parts = re.split(r"(?<=[\.!?])\s+|\n+", text)
-        return [p.strip() for p in parts if p and p.strip()]
+        return ""
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
-# ---------- 토큰화 ----------
-_WORD_RE = re.compile(r"[A-Za-z0-9]+|[가-힣]+")
-
-def _tokenize(text: str) -> List[str]:
-    return [t.lower() for t in _WORD_RE.findall(text or "")]
-
-# ---------- TF-IDF 기반 간단 문장 랭킹 ----------
-def _rank_sentences_by_query(query: str, sentences: List[str]) -> List[Tuple[int, float]]:
+def _build_citation(meta: Dict, fallback: str = "") -> str:
     """
-    간단 TF-IDF: 질문 토큰과의 교집합 토큰에 대해서만 가중치 합산.
-    반환: [(문장인덱스, 점수), ...] 내림차순
+    유튜브: 타임코드 / PDF: 페이지 / 그 외: URL 또는 파일명
     """
-    if not sentences:
-        return []
+    src = meta.get("source") or meta.get("url") or meta.get("file_path") or fallback
+    title = meta.get("title")
+    kind = (meta.get("source_type") or meta.get("type") or "").lower()
+    # PDF 페이지
+    page = meta.get("page") or meta.get("page_number") or meta.get("pageIndex")
+    # YouTube 시간
+    start = meta.get("start") or meta.get("start_time") or meta.get("timestamp")
 
-    q_tokens = set(_tokenize(query))
-    sent_tokens = [_tokenize(s) for s in sentences]
+    # 유튜브 추정
+    is_yt = "youtube" in str(src).lower() or kind == "youtube" or meta.get("is_youtube")
+    # pdf 추정
+    is_pdf = str(src).lower().endswith(".pdf") or kind == "pdf" or meta.get("is_pdf")
 
-    # DF/IDF 계산(문장 단위)
-    df = Counter()
-    for toks in sent_tokens:
-        uniq = set(toks)
-        for t in uniq:
-            df[t] += 1
+    if is_yt and start is not None:
+        tc = _format_timecode(start)
+        label = f"{title or 'YouTube'} @ {tc}" if tc else f"{title or 'YouTube'}"
+        return f"{label} | {src}" if src else label
 
-    N = len(sentences)
-    def idf(t: str) -> float:
-        return math.log(1.0 + N / (1.0 + df.get(t, 0)))
+    if is_pdf and page is not None:
+        label = f"{title or 'PDF'} p.{page}"
+        return f"{label} | {src}" if src else label
 
-    scores: List[Tuple[int, float]] = []
-    for idx, toks in enumerate(sent_tokens):
-        if not toks:
-            scores.append((idx, 0.0))
-            continue
-        tf = Counter(toks)
-        # 질문과 겹치는 토큰들만 반영
-        common = q_tokens.intersection(tf.keys())
-        s = sum(tf[t] * idf(t) for t in common)
-        scores.append((idx, s))
+    # 일반 웹/텍스트
+    if title and src:
+        return f"{title} | {src}"
+    return src or title or "출처 미상"
 
-    # 점수 내림차순
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return scores
-
-# ---------- 메타데이터에서 페이지/타임코드 추출 ----------
-def _find_page(meta: Dict[str, Any]) -> Any:
-    if meta is None:
-        return None
-    if "page" in meta:
-        return meta["page"]
-    if "page_number" in meta:
-        return meta["page_number"]
-    loc = meta.get("loc")
-    if isinstance(loc, dict) and "page" in loc:
-        return loc["page"]
-    return None
-
-def _find_timecode(meta: Dict[str, Any]) -> str | None:
-    # 초 단위 start/end or 문자열 타임코드가 들어오는 케이스를 모두 흡수
-    for key in ("start", "start_time", "timestamp", "yt_timecode"):
-        if key in meta and meta[key]:
-            if isinstance(meta[key], (int, float)):
-                secs = int(meta[key])
-                m, s = divmod(secs, 60)
-                return f"{m:02d}:{s:02d}"
-            return str(meta[key])
-    return None
-
-def _format_source_label(meta: Dict[str, Any]) -> str:
-    src = meta.get("source") or meta.get("url") or meta.get("file_path") or "source"
-    page = _find_page(meta)
-    tc = _find_timecode(meta)
-    suffix = []
-    if page is not None:
-        suffix.append(f"p.{page}")
-    if tc:
-        suffix.append(f"t={tc}")
-    return f"{src}" + (f" ({', '.join(suffix)})" if suffix else "")
-
-# ---------- 문서 -> 최소 문장들로 축약 ----------
-def _prune_docs_to_min_sentences(
-    question: str,
-    docs: List[Document],
-    per_doc_max: int = 3
-) -> List[Document]:
-    """각 문서에서 질문과 가장 관련 높은 문장들만 남겨 Document.page_content를 축약.
-    또한 meta['selected_sentences']에 [{text, label}] 저장."""
-    pruned: List[Document] = []
+def extract_relevant_sentences(query: str, docs: List[Document], max_sentences: int = 8) -> List[Dict]:
+    """
+    각 문서를 문장 단위로 쪼개 간단한 토큰 겹침 점수로 랭킹 → 상위 문장만 수집.
+    반환: [{ "text": 문장, "score": 점수, "citation": 문자열, "meta": 메타 }, ... ]
+    """
+    q_tok = _tokenize(query)
+    pool: List[Tuple[float, Dict]] = []
     for d in docs:
-        sents = _split_sentences(d.page_content or "")
-        if not sents:
-            pruned.append(d)
+        text = d.page_content or ""
+        meta = d.metadata or {}
+        for sent in _sent_tokenize_kr(text):
+            s_tok = _tokenize(sent)
+            score = _overlap_score(q_tok, s_tok)
+            if score <= 0:
+                continue
+            pool.append((score, {
+                "text": sent,
+                "meta": meta,
+                "citation": _build_citation(meta),
+                "score": score,
+            }))
+
+    # 점수 내림차순 → 출처 다양성 확보 위해 같은 소스 연속 과다 선택 방지
+    pool.sort(key=lambda x: x[0], reverse=True)
+
+    picked: List[Dict] = []
+    seen_per_source = {}
+    for _, item in pool:
+        src_key = (item["meta"].get("source") or item["meta"].get("url") or "unknown")
+        if seen_per_source.get(src_key, 0) >= 3:
             continue
+        picked.append(item)
+        seen_per_source[src_key] = seen_per_source.get(src_key, 0) + 1
+        if len(picked) >= max_sentences:
+            break
 
-        ranked = _rank_sentences_by_query(question, sents)
-        keep_idxs = [i for i, score in ranked[:max(1, per_doc_max)] if score > 0]
-        # 점수가 모두 0이라면 첫 문장만
-        if not keep_idxs and ranked:
-            keep_idxs = [ranked[0][0]]
+    # 문장이 1개도 없으면, 상위 문서의 앞부분을 안전하게 대체
+    if not picked and docs:
+        d0 = docs[0]
+        meta = d0.metadata or {}
+        fallback = (d0.page_content or "").strip().split("\n", 1)[0][:300]
+        picked = [{
+            "text": fallback,
+            "meta": meta,
+            "citation": _build_citation(meta),
+            "score": 0.0
+        }]
+    return picked
 
-        kept = [sents[i] for i in sorted(keep_idxs)]
-        # 문장별 라벨(출처 + p./t=)
-        label = _format_source_label(d.metadata or {})
-        citations = [{"text": s, "label": label} for s in kept]
-
-        new_meta = dict(d.metadata or {})
-        new_meta["selected_sentences"] = citations
-
-        pruned.append(
-            Document(
-                page_content=" ".join(kept),
-                metadata=new_meta
-            )
-        )
-    return pruned
-
-# ====== 기존 retrieve 함수 대체 ======
-# 기존에 있던 retrieve 함수 이름이 아래와 동일하다면 이 버전으로 교체하세요.
-def retrieve_and_fuse_results(retriever, queries: List[str]) -> List[Document]:
+def build_answer_from_sentences(llm, query: str, picked: List[Dict]) -> str:
     """
-    기존: retriever.batch(queries) -> 문서 리스트 반환
-    변경: 동일 반환이지만, 각 Document.page_content를 질문과 관련 높은 문장만 남기도록 축약하고
-         metadata['selected_sentences']에 문장별 출처 라벨을 담아둠.
+    반드시 인용문만 근거로 대답하도록 강제. 출력 끝에 [출처] 블록에 사용 문장과 출처를 나열.
     """
-    retrieved_docs_lists = retriever.batch(queries)
-    # 평탄화
-    flat_docs: List[Document] = []
-    for lst in retrieved_docs_lists:
-        if lst:
-            flat_docs.extend(lst)
+    numbered = []
+    for i, it in enumerate(picked, 1):
+        numbered.append(f"[S{i}] {it['text']}\n    └ 출처: {it['citation']}")
+    context = "\n\n".join(numbered)
 
-    question = queries[0] if queries else ""
-    pruned = _prune_docs_to_min_sentences(question, flat_docs, per_doc_max=3)
-    return pruned
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "너는 신중한 RAG 비서다. 아래 [근거문장]에 포함된 내용만을 사용해 한국어로 답하라. "
+         "모호하면 '제공된 출처로는 확정하기 어렵습니다'라고 말하라. "
+         "추측하지 말고, 인용문 밖 내용을 가져오지 마라."),
+        ("human",
+         "질문: {query}\n\n[근거문장]\n{context}\n\n"
+         "요청사항:\n- 위 문장들로만 답변을 구성\n- 과도한 요약 금지, 핵심만 명확히\n- 마지막에 [출처] 섹션으로 사용한 문장과 출처를 그대로 나열")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke({"query": query, "context": context})
