@@ -33,3 +33,4 @@ pdfminer.six
 
 langchain-text-splitters
 numpy
+chromadb
