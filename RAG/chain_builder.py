@@ -10,7 +10,7 @@ from langchain.text_splitter import SpacyTextSplitter
 
 
 def format_docs_for_llm(docs: list[Document]) -> str:
-    """LLM 프롬프프트용으로 문서 내용을 포맷합니다."""
+    """LLM 프롬프트용으로 문서 내용을 포맷합니다."""
     if not docs:
         return "No context provided."
     return "\n\n---\n\n".join([doc.page_content for doc in docs])
@@ -40,7 +40,6 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         query_generation_prompt 
         | llm 
         | JsonOutputParser()
-        # JSON에서 쿼리 리스트만 추출하여 반환
         | RunnableLambda(lambda x: x.get("queries", []))
     )
 
@@ -49,6 +48,7 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         if not queries: 
             return []
         
+        # retriever.batch는 각 쿼리(문자열)에 대해 retriever.invoke를 병렬 실행
         retrieved_docs_lists = retriever.batch(queries)
         
         unique_docs: Dict[str, Document] = {}
@@ -77,18 +77,18 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
     )
     sentence_extractor_chain = sentence_extraction_prompt | llm | StrOutputParser()
 
-    # 5. 전체 파이프라인 구성
-    retrieval_chain = (
-        RunnableParallel({
-            "generated_queries": question_to_queries_chain,
-            "original_question": lambda x: x["question"]
-        })
-        | RunnableParallel({
-            "fused_documents": lambda x: retrieve_and_fuse_results(x["generated_queries"]),
-            "original_question": lambda x: x["original_question"]
-        })
-    )
+    # 5. ★★★ 전체 파이프라인 데이터 흐름 수정 ★★★
+    # main.py에서 전달된 'user_query' (문자열)를 각 단계에 맞게 전달
+    
+    # 5-1. 질문 확장 및 검색
+    retrieval_chain = {
+        # RunnablePassthrough는 입력을 그대로 전달.
+        # 즉, 'user_query' 문자열이 question_to_queries_chain의 입력으로 들어감
+        "fused_documents": {"question": RunnablePassthrough()} | question_to_queries_chain | RunnableLambda(retrieve_and_fuse_results),
+        "original_question": RunnablePassthrough()
+    }
 
+    # 5-2. 재정렬 및 답변 생성
     rag_chain_with_sources = (
         retrieval_chain
         | RunnableParallel({
@@ -110,6 +110,7 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
         }
     )
 
+    # 5-3. 최종 근거 문장 추출
     def extract_and_format_final_sources(rag_output: Dict) -> Dict:
         answer = rag_output["answer"]
         source_chunks = rag_output["source_documents"]
@@ -145,4 +146,5 @@ def get_conversational_rag_chain(retriever, system_prompt: str):
 
     final_chain = rag_chain_with_sources | RunnableLambda(extract_and_format_final_sources)
     
-    return RunnableLambda(lambda question_str: final_chain.invoke({"question": question_str}))
+    # 이제 final_chain은 main.py에서 전달하는 user_query(문자열)를 직접 입력으로 받음
+    return final_chain
