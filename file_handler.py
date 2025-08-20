@@ -1,164 +1,350 @@
 from __future__ import annotations
-
+from typing import Any, Dict, List, Optional, Tuple, Iterable, Union
 import io
 import os
 import re
-import asyncio
-import tempfile
-import pathlib
-import typing as t
-from urllib.parse import urlparse
-from urllib import robotparser
+import csv
 
-import httpx
-from bs4 import BeautifulSoup
-from charset_normalizer import from_bytes
-from langchain_core.documents import Document
-
-# --- (이하 라이브러리 임포트는 이전과 동일) ---
+# LangChain Document 호환
 try:
-    import trafilatura
+    from langchain_core.documents import Document
 except Exception:
-    trafilatura = None
-try:
-    from readability import Document as ReadabilityDoc
-except Exception:
-    ReadabilityDoc = None
-try:
-    from playwright.async_api import async_playwright # 비동기 버전으로 변경
-except Exception:
-    async_playwright = None # 비동기 버전으로 변경
-try:
-    from pdfminer.high_level import extract_text as pdf_extract_text
-except Exception:
-    pdf_extract_text = None
-try:
-    import docx
-except Exception:
-    docx = None
-try:
-    from llama_parse import LlamaParse
-except Exception:
-    LlamaParse = None
-
-LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY")
-
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
-}
-
-def _is_valid_url(u: str) -> bool:
     try:
-        p = urlparse(u.strip())
-        return p.scheme in {"http", "https"} and bool(p.netloc)
+        from langchain.schema import Document  # type: ignore
     except Exception:
-        return False
+        class Document:  # type: ignore
+            def __init__(self, page_content: str, metadata: Optional[Dict[str, Any]] = None):
+                self.page_content = page_content
+                self.metadata = metadata or {}
 
-def _clean_text(text: str) -> str:
-    text = re.sub(r"\s{3,}", "\n\n", text)
+# 선택적 의존성
+try:
+    from pypdf import PdfReader  # pip install pypdf
+except Exception:
+    try:
+        from PyPDF2 import PdfReader  # type: ignore
+    except Exception:
+        PdfReader = None  # type: ignore
+
+try:
+    import docx  # python-docx
+except Exception:
+    docx = None  # type: ignore
+
+try:
+    from bs4 import BeautifulSoup  # pip install beautifulsoup4
+except Exception:
+    BeautifulSoup = None  # type: ignore
+
+try:
+    import chardet  # pip install chardet
+except Exception:
+    chardet = None  # type: ignore
+
+
+# -----------------------------------------------------------------------------
+# 유틸
+# -----------------------------------------------------------------------------
+_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"}
+_HTML_EXTS = {".html", ".htm"}
+_SUB_EXTS  = {".srt", ".vtt"}
+_DOCX_EXTS = {".docx"}
+_PDF_EXTS  = {".pdf"}
+
+
+def _ext(path_or_name: str) -> str:
+    return os.path.splitext(path_or_name.lower())[1]
+
+
+def _is_filelike(obj: Any) -> bool:
+    return hasattr(obj, "read")
+
+
+def _detect_encoding(b: bytes) -> str:
+    if not b:
+        return "utf-8"
+    if chardet is not None:
+        try:
+            guess = chardet.detect(b) or {}
+            enc = guess.get("encoding")
+            if enc:
+                return enc
+        except Exception:
+            pass
+    return "utf-8"
+
+
+def _to_bytes(obj: Union[bytes, bytearray, io.BufferedIOBase, io.BytesIO, Any]) -> bytes:
+    if isinstance(obj, (bytes, bytearray)):
+        return bytes(obj)
+    if _is_filelike(obj):
+        pos = None
+        try:
+            pos = obj.tell()
+        except Exception:
+            pos = None
+        data = obj.read()
+        try:
+            if pos is not None:
+                obj.seek(pos)
+        except Exception:
+            pass
+        if isinstance(data, str):
+            return data.encode("utf-8", errors="replace")
+        return data or b""
+    if isinstance(obj, str) and os.path.exists(obj):
+        with open(obj, "rb") as f:
+            return f.read()
+    return b""
+
+
+def _bytes_to_text(b: bytes) -> str:
+    enc = _detect_encoding(b)
+    try:
+        return b.decode(enc, errors="replace")
+    except Exception:
+        return b.decode("utf-8", errors="replace")
+
+
+def _strip_html(html: str) -> str:
+    if not html:
+        return ""
+    if BeautifulSoup is not None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            text = soup.get_text("\n")
+            # 공백 정리
+            text = re.sub(r"[ \t]+", " ", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text.strip()
+        except Exception:
+            pass
+    # 폴백(간단 태그 제거)
+    text = re.sub(r"<(script|style)[\s\S]*?</\1>", "", html, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-# --- (HTML 및 파일 처리 함수들은 이전과 거의 동일) ---
-def extract_readable_text(html: str, url: str) -> t.Tuple[str, str]:
-    # ... (기존 extract_readable_text 함수 내용)
-    text, title = "", ""
-    try:
-        text, title = trafilatura.extract(html, url=url), trafilatura.extract_metadata(html).title
-    except: pass
-    if len(text) < 200:
+
+# -----------------------------------------------------------------------------
+# 파서: PDF
+# -----------------------------------------------------------------------------
+def _parse_pdf_to_documents(name: str, raw: bytes) -> List[Document]:
+    if PdfReader is None:
+        raise ImportError(
+            "PDF 처리를 위해 pypdf(또는 PyPDF2)가 필요합니다. `pip install pypdf` 를 설치하세요."
+        )
+    bio = io.BytesIO(raw)
+    reader = PdfReader(bio)
+    docs: List[Document] = []
+    for i, page in enumerate(reader.pages):
         try:
-            doc = ReadabilityDoc(html)
-            text = doc.summary()
-            title = title or doc.short_title()
-        except: pass
-    return _clean_text(text), title
+            txt = page.extract_text() or ""
+        except Exception:
+            txt = ""
+        txt = txt.strip()
+        if not txt:
+            continue
+        meta = {
+            "source": name,
+            "type": "pdf",
+            "page": i + 1,  # 1-based
+        }
+        docs.append(Document(page_content=txt, metadata=meta))
+    return docs or [Document(page_content="", metadata={"source": name, "type": "pdf"})]
 
-# ★★★ Playwright 로직을 비동기(async)로 수정 ★★★
-async def render_with_playwright_async(url: str) -> str:
-    if not async_playwright:
-        return ""
+
+# -----------------------------------------------------------------------------
+# 파서: DOCX
+# -----------------------------------------------------------------------------
+def _parse_docx_to_documents(name: str, raw: bytes) -> List[Document]:
+    if docx is None:
+        # docx 없으면 텍스트로 시도
+        return [_as_text_document(name, raw, ftype="docx")]
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=DEFAULT_HEADERS["User-Agent"])
-            await page.goto(url, wait_until="networkidle", timeout=20000)
-            await page.wait_for_timeout(1500) # 추가 대기
-            content = await page.content()
-            await browser.close()
-            return content
-    except Exception as e:
-        print(f"Playwright rendering failed for {url}: {e}")
-        return ""
-
-# ★★★ URL 처리를 위한 핵심 비동기 함수 ★★★
-async def process_url(
-    client: httpx.AsyncClient,
-    url: str,
-    respect_robots: bool,
-    use_js_render: bool,
-    js_only_when_needed: bool,
-    min_chars: int
-) -> Document | None:
-    if respect_robots:
-        # (간략화된 버전, 실제로는 robots.txt 파싱 필요)
-        pass
-
-    try:
-        # 1. 일반 GET 요청
-        resp = await client.get(url, follow_redirects=True, timeout=15.0)
-        resp.raise_for_status()
-
-        content_type = resp.headers.get("content-type", "").lower()
-        
-        # PDF 처리
-        if "pdf" in content_type or url.endswith(".pdf"):
-            # (PDF 처리 로직은 생략, 기존과 유사)
-            return None
-
-        # HTML 처리
-        html = await resp.aread()
-        encoding = from_bytes(html).best().encoding
-        html_str = html.decode(encoding, errors="replace")
-
-        extracted_text, title = extract_readable_text(html_str, url)
-
-        # 2. 필요 시 JS 렌더링
-        if use_js_render and (not js_only_when_needed or len(extracted_text) < min_chars):
-            rendered_html = await render_with_playwright_async(url)
-            if rendered_html:
-                t2, tt2 = extract_readable_text(rendered_html, url)
-                if len(t2) > len(extracted_text):
-                    extracted_text, title = t2, tt2 or title
-
-        if len(extracted_text) >= min_chars:
-            return Document(page_content=extracted_text, metadata={"source": url, "title": title or url})
-
-    except Exception as e:
-        print(f"Failed to process URL {url}: {e}")
-    return None
+        bio = io.BytesIO(raw)
+        d = docx.Document(bio)
+        paras = [p.text for p in d.paragraphs if p.text and p.text.strip()]
+        text = "\n".join(paras).strip()
+        meta = {"source": name, "type": "docx"}
+        return [Document(page_content=text, metadata=meta)]
+    except Exception:
+        return [_as_text_document(name, raw, ftype="docx")]
 
 
-# ★★★ Public API를 비동기 방식으로 수정 ★★★
-async def get_documents_from_urls_async(
-    urls: t.List[str], **kwargs
-) -> t.List[Document]:
-    
-    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, verify=False) as client:
-        tasks = [process_url(client, url, **kwargs) for url in urls if _is_valid_url(url)]
-        results = await asyncio.gather(*tasks)
-        return [doc for doc in results if doc]
+# -----------------------------------------------------------------------------
+# 파서: SRT/VTT
+# -----------------------------------------------------------------------------
+_SRT_TIME = re.compile(r"(\d{1,2}):(\d{2}):(\d{2}),(\d{3})")
+_VTT_TIME = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\.(\d{3})")
 
-# Streamlit과 같은 동기 환경에서 비동기 함수를 실행하기 위한 래퍼
-def get_documents_from_urls_robust(
-    urls: t.List[str], **kwargs
-) -> t.List[Document]:
-    return asyncio.run(get_documents_from_urls_async(urls, **kwargs))
 
-# --- (get_documents_from_uploaded_files 함수는 기존과 동일) ---
-def get_documents_from_uploaded_files(files: t.List, **kwargs) -> t.List[Document]:
-    # ... (기존 파일 처리 로직)
-    docs = []
-    # ...
-    return docs
+def _to_seconds(h: int, m: int, s: int, ms: int) -> float:
+    return h * 3600 + m * 60 + s + ms / 1000.0
+
+
+def _parse_srt(content: str) -> List[Tuple[float, float, str]]:
+    lines = content.splitlines()
+    cues: List[Tuple[float, float, str]] = []
+    buf: List[str] = []
+    start = end = 0.0
+
+    def flush():
+        nonlocal buf, start, end
+        if buf:
+            text = "\n".join([x for x in buf if x.strip()]).strip()
+            if text:
+                cues.append((start, end, text))
+        buf = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # 인덱스 줄(숫자) skip
+        if re.fullmatch(r"\d+", line):
+            i += 1
+            if i >= len(lines):
+                break
+            # 타임라인
+            tline = lines[i].strip()
+            # 00:00:00,000 --> 00:00:02,000
+            parts = re.split(r"\s*-->\s*", tline)
+            if len(parts) == 2:
+                m1 = _SRT_TIME.search(parts[0])
+                m2 = _SRT_TIME.search(parts[1])
+                if m1 and m2:
+                    start = _to_seconds(*map(int, m1.groups()))
+                    end = _to_seconds(*map(int, m2.groups()))
+                    i += 1
+                    buf = []
+                    # 본문
+                    while i < len(lines) and lines[i].strip() != "":
+                        buf.append(lines[i])
+                        i += 1
+                    flush()
+        i += 1
+    return cues
+
+
+def _parse_vtt(content: str) -> List[Tuple[float, float, str]]:
+    # WEBVTT 헤더 제거
+    content = re.sub(r"^\ufeff?WEBVTT.*?$", "", content, flags=re.I | re.M).strip()
+    cues: List[Tuple[float, float, str]] = []
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # 타임라인: 00:00:00.000 --> 00:00:02.000
+        if "-->" in line:
+            parts = re.split(r"\s*-->\s*", line)
+            if len(parts) == 2:
+                m1 = _VTT_TIME.search(parts[0])
+                m2 = _VTT_TIME.search(parts[1])
+                if m1 and m2:
+                    start = _to_seconds(*map(int, m1.groups()))
+                    end = _to_seconds(*map(int, m2.groups()))
+                    i += 1
+                    text_lines: List[str] = []
+                    while i < len(lines) and lines[i].strip() != "":
+                        text_lines.append(lines[i])
+                        i += 1
+                    text = "\n".join([t for t in text_lines if t.strip()]).strip()
+                    if text:
+                        cues.append((start, end, text))
+        i += 1
+    return cues
+
+
+def _parse_subtitles_to_documents(name: str, raw: bytes, ftype: str) -> List[Document]:
+    text = _bytes_to_text(raw)
+    cues = _parse_srt(text) if ftype == "srt" else _parse_vtt(text)
+    docs: List[Document] = []
+    for idx, (start, end, t) in enumerate(cues, 1):
+        meta = {
+            "source": name,
+            "type": ftype,
+            "start": float(start),
+            "end": float(end),
+            "index": idx,
+        }
+        docs.append(Document(page_content=t, metadata=meta))
+    return docs or [Document(page_content="", metadata={"source": name, "type": ftype})]
+
+
+# -----------------------------------------------------------------------------
+# 파서: 텍스트/CSV/HTML 일반
+# -----------------------------------------------------------------------------
+def _as_text_document(name: str, raw: bytes, ftype: str = "text") -> Document:
+    text = _bytes_to_text(raw)
+    if ftype in {"html", "htm"}:
+        text = _strip_html(text)
+    elif ftype == "csv":
+        # CSV를 간단히 TSV 형태 문자열로 정규화
+        try:
+            sio = io.StringIO(text)
+            reader = csv.reader(sio)
+            rows = ["\t".join(row) for row in reader]
+            text = "\n".join(rows)
+        except Exception:
+            pass
+    return Document(page_content=text.strip(), metadata={"source": name, "type": ftype})
+
+
+# -----------------------------------------------------------------------------
+# 공개 함수: get_documents_from_files
+# -----------------------------------------------------------------------------
+def get_documents_from_files(
+    files: Iterable[Union[str, bytes, io.BytesIO, Any]],
+    *,
+    max_file_size_mb: int = 50,
+) -> List[Document]:
+    """
+    다양한 입력 형태(files)를 LangChain Document 리스트로 변환.
+    - files: 스트림릿 UploadedFile, 파일 경로(str), 바이트, 파일-like 등 혼합 가능
+    """
+    max_bytes = max_file_size_mb * 1024 * 1024
+    out: List[Document] = []
+
+    for f in files or []:
+        # 이름/경로/확장자 추출
+        if _is_filelike(f):
+            name = getattr(f, "name", "uploaded_file")
+        elif isinstance(f, (bytes, bytearray)):
+            name = "bytes_input"
+        elif isinstance(f, str):
+            name = os.path.basename(f)
+        else:
+            name = getattr(f, "name", str(f))
+
+        ext = _ext(name)
+
+        # 바이트 로드
+        raw = _to_bytes(f)
+        if len(raw) > max_bytes:
+            # 용량 초과 시 스킵 (필요 시 경고 로그)
+            continue
+
+        # 타입 분기
+        try:
+            if ext in _PDF_EXTS:
+                out.extend(_parse_pdf_to_documents(name, raw))
+            elif ext in _SUB_EXTS:
+                out.extend(_parse_subtitles_to_documents(name, raw, ftype=ext.lstrip(".")))
+            elif ext in _DOCX_EXTS:
+                out.extend(_parse_docx_to_documents(name, raw))
+            elif ext in _HTML_EXTS:
+                out.append(_as_text_document(name, raw, ftype="html"))
+            elif ext in _TEXT_EXTS:
+                ftype = ext.lstrip(".") if ext else "text"
+                out.append(_as_text_document(name, raw, ftype=ftype))
+            else:
+                # 알 수 없는 형식은 텍스트로 시도
+                out.append(_as_text_document(name, raw, ftype=ext.lstrip(".") or "bin"))
+        except Exception as e:
+            # 파싱 실패 시 빈 문서라도 반환(출처 보존)
+            out.append(Document(page_content="", metadata={"source": name, "error": str(e)}))
+
+    return out
