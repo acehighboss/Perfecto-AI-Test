@@ -59,12 +59,14 @@ def _fmt_ts(seconds: Any) -> str:
 def _sentence_rows_from_doc(doc: Document) -> List[Dict[str, Any]]:
     """
     Document → 문장 단위 row 변환
-    반환 row: {text, source, where, metadata}
+    반환 row: {text, source, where, citation, metadata}
     where: PDF면 'p.N', 자막이면 't=MM:SS'
+    citation: main.py가 바로 출력 가능한 문자열(예: 'https://... p.3' 또는 'https://... t=01:23')
     """
     rows: List[Dict[str, Any]] = []
     meta = getattr(doc, "metadata", {}) or {}
     src = meta.get("source") or meta.get("url") or meta.get("path") or ""
+    title = meta.get("title") or ""
 
     page = meta.get("page") or meta.get("page_number")
     ts = meta.get("start") or meta.get("timestamp") or meta.get("start_time")
@@ -77,11 +79,19 @@ def _sentence_rows_from_doc(doc: Document) -> List[Dict[str, Any]]:
             where = f"p.{page}"
         elif ts is not None:
             where = f"t={_fmt_ts(ts)}"
+
+        # citation은 main.py에서 바로 쓰도록 source(+선택 where)로 구성
+        # 제목이 있더라도 UI 단에서 혼선을 줄이기 위해 기본은 URL/경로 기준으로 표기
+        citation = (src or "").strip()
+        if where:
+            citation = f"{citation} {where}".strip()
+
         rows.append(
             {
                 "text": sent.strip(),
                 "source": src,
-                "where": where,
+                "where": where,        # 'p.3' 또는 't=01:23'
+                "citation": citation,  # ✅ main.py 호환 필드
                 "metadata": meta,
             }
         )
@@ -121,11 +131,11 @@ def extract_relevant_sentences(
     per_source_limit: Optional[int] = None,
     limit: Optional[int] = None,
     limit_per_source: Optional[int] = None,
-    **kwargs,  # 추가로 넘어오는 예기치 못한 인자 무시 (안전장치)
+    **kwargs,  # 예기치 못한 인자 무시 (안전장치)
 ) -> List[Dict[str, Any]]:
     """
     검색된 Document들에서 질문과 가장 관련 높은 문장만 추출.
-    반환: [{text, score, source, where, metadata}]
+    반환: [{text, score, source, where, citation, metadata}]
 
     매개변수 호환:
     - max_sentences 또는 limit -> top_k
